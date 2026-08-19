@@ -1,0 +1,22 @@
+# Secrets — never commit API keys
+.env
+.env.*
+!.env.example
+
+# Cached API data — regenerate via scripts/. Keep the dir structure only.
+/data/raw/*
+/data/processed/*
+/data/snapshots/*
+!/data/**/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Notebooks
+.ipynb_checkpoints/
