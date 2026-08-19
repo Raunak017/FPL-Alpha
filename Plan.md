@@ -145,3 +145,114 @@ Start with Steps **1–4**:
 4. Market-implied team xG
 
 Once those are reliable, move into player-level projections.
+
+## High-Level Architecture
+
+                        ┌─────────────────┐
+                        │ Official FPL API│
+                        └────────┬────────┘
+                                 │
+                                 │
+┌─────────────────┐      ┌──────▼──────┐      ┌──────────────────┐
+│ Football Stats  │─────▶│ Identity +  │◀─────│ Betting Markets  │
+│                 │      │ Data Layer   │      │                  │
+└─────────────────┘      └──────┬──────┘      └──────────────────┘
+                                 │
+                                 ▼
+                      ┌─────────────────────┐
+                      │ Probability Engine  │
+                      │                     │
+                      │ Team xG             │
+                      │ Clean-sheet prob.   │
+                      │ Goal probability    │
+                      │ Assist probability  │
+                      │ Expected minutes    │
+                      │ Saves / cards       │
+                      │ DefCon              │
+                      └─────────┬───────────┘
+                                │
+                                ▼
+                       ┌─────────────────┐
+                       │ Match Simulator │
+                       └────────┬────────┘
+                                │
+                                ▼
+                       ┌─────────────────┐
+                       │ FPL Scoring     │
+                       │ Engine          │
+                       └────────┬────────┘
+                                │
+                                ▼
+                       ┌─────────────────┐
+                       │ Player xPts     │
+                       │ Distributions   │
+                       └────────┬────────┘
+                                │
+                                ▼
+                       ┌─────────────────┐
+                       │ Squad / Transfer│
+                       │ Optimizer       │
+                       └─────────────────┘
+
+## Proposed Repository Structure
+
+Initial structure:
+
+fpl-alpha/
+├── README.md
+├── PROJECT_PLAN.md
+├── AGENTS.md
+├── pyproject.toml
+├── .env.example
+├── .gitignore
+│
+├── src/
+│   └── fpl_alpha/
+│       ├── ingestion/
+│       │   ├── fpl/
+│       │   ├── odds/
+│       │   └── stats/
+│       │
+│       ├── identity/
+│       │
+│       ├── markets/
+│       │   ├── normalization/
+│       │   ├── no_vig/
+│       │   └── consensus/
+│       │
+│       ├── models/
+│       │   ├── team_goals/
+│       │   ├── player_goals/
+│       │   ├── assists/
+│       │   ├── minutes/
+│       │   ├── clean_sheets/
+│       │   ├── saves/
+│       │   ├── defcon/
+│       │   └── bonus/
+│       │
+│       ├── simulation/
+│       │
+│       ├── scoring/
+│       │
+│       ├── projections/
+│       │
+│       ├── optimization/
+│       │
+│       └── evaluation/
+│
+├── tests/
+│
+├── notebooks/
+│
+├── scripts/
+│
+├── data/
+│   ├── raw/
+│   ├── processed/
+│   └── snapshots/
+│
+└── docs/
+
+This structure should evolve as the architecture becomes clearer.
+
+Avoid creating abstractions purely to match this proposed structure.
