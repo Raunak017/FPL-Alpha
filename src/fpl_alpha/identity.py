@@ -4,11 +4,15 @@ The hard problem here is joining odds-feed names ("Man City", "Erling Haaland")
 to FPL element/team ids. Everything downstream keys off FPL ids, so this stage
 owns the alias tables and the fuzzy matcher.
 
-Status: normalizers scaffolded; the odds<->FPL name matcher is the first real
-task once an odds feed is flowing.
+Matching is a cascade — exact/alias/normalized first, fuzzy (stdlib difflib) as
+the fallback — with a threshold below which we return None rather than guess, so
+misses stay visible instead of silently mapping to the wrong player.
 """
 from __future__ import annotations
 
+import unicodedata
+from collections.abc import Iterable
+from difflib import SequenceMatcher
 from typing import Any
 
 from .schemas import Player, Team
@@ -42,10 +46,52 @@ def players_from_bootstrap(bootstrap: dict[str, Any]) -> list[Player]:
     return out
 
 
-def match_odds_name(name: str, candidates: list[Player | Team]) -> Player | Team | None:
+def _norm(s: str) -> str:
+    """Lowercase, strip accents and punctuation, collapse whitespace.
+
+    'Ødegaard' -> 'odegaard', 'Man. City' -> 'man city'.
+    """
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = s.lower()
+    s = "".join(c if c.isalnum() or c.isspace() else " " for c in s)
+    return " ".join(s.split())
+
+
+def _candidate_names(candidate: Player | Team) -> set[str]:
+    """All normalized names a candidate can legitimately be called."""
+    names: list[str] = list(candidate.aliases)
+    if isinstance(candidate, Player):
+        names += [candidate.web_name, candidate.full_name]
+    else:  # Team
+        names += [candidate.name, candidate.short_name]
+    return {_norm(n) for n in names if n}
+
+
+def match_odds_name(
+    name: str,
+    candidates: Iterable[Player | Team],
+    *,
+    threshold: float = 0.85,
+) -> Player | Team | None:
     """Resolve a name from an odds feed to a canonical Player/Team.
 
-    TODO(identity): exact -> alias-table -> normalized -> fuzzy (rapidfuzz)
-    cascade, with an unresolved-names log so misses are visible, never silent.
+    Returns the best match, or ``None`` if the best fuzzy score is below
+    ``threshold`` — callers should log a None so unresolved names are visible
+    rather than silently dropped.
     """
-    raise NotImplementedError("odds<->FPL name matching not implemented yet")
+    target = _norm(name)
+    if not target:
+        return None
+
+    best: Player | Team | None = None
+    best_score = 0.0
+    for candidate in candidates:
+        for cand_name in _candidate_names(candidate):
+            if cand_name == target:  # exact / alias / normalized hit
+                return candidate
+            score = SequenceMatcher(None, target, cand_name).ratio()
+            if score > best_score:
+                best_score, best = score, candidate
+
+    return best if best_score >= threshold else None

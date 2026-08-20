@@ -9,11 +9,12 @@ description = "Market-informed FPL projection and optimization engine"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    # Stdlib-only for ingestion (steps 1–2). Add deps as stages need them:
-    #   numpy/scipy  -> team_xg + simulation (steps 4, 9)
+    # Stdlib-only through step 4 (ingestion, no-vig, team-xG all pure Python).
+    # Add deps as later stages need them:
+    #   numpy/scipy  -> Monte Carlo simulation + Dixon–Coles xG upgrade (steps 4, 9)
     #   pandas       -> projections (step 11)
     #   pulp/ortools -> optimization (step 12)
-    #   rapidfuzz    -> identity name matching
+    #   rapidfuzz    -> faster/better identity name matching (stdlib difflib for now)
 ]
 
 [project.optional-dependencies]

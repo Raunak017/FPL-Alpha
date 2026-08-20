@@ -42,8 +42,9 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 cp .env.example .env          # add keys / team ids as available
 
-python scripts/refresh_fpl.py # cache FPL bootstrap + fixtures
-pytest                        # runs the no-vig math tests
+python scripts/refresh_fpl.py      # cache FPL bootstrap + fixtures
+python scripts/demo_market_to_xg.py # odds -> fair probs -> team xG (offline demo)
+pytest                             # runs the unit tests
 ```
 
 ## Developers
