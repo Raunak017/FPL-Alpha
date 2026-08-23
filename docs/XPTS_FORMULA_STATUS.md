@@ -36,41 +36,41 @@ fetch them per-run. Position order is GKP / DEF / MID / FWD.
 |------|--------|-------------------|---------|-----------|
 | **P(CS)** | 🟡 ~80% | `team_xg.fit_team_goals` → `p_clean_sheet_home/away` from fitted Poisson λ; tested | Attach team CS prob to that team's players | 4 ✅ (team) |
 | **CS_pts** | 🟡 trivial | `Player.position` known | Write the position→points table | 8 |
-| **xG** (per player) | 🔴 ~10% | *Team* λ only; bootstrap has per-player `expected_goals(_per_90)` | **Team→player allocation** (the blocker) | 5 |
+| **xG** (per player) | 🟡 ~70% | `allocation.allocate_fixture` splits team λ by season-xG share; tested | Minutes weighting (step 7); props as an alt source | 5 |
 | **g_pts** | 🟡 trivial | position known | constant table | 8 |
-| **xA** (per player) | 🔴 ~10% | bootstrap has `expected_assists(_per_90)` | same allocation gap; not in schema | 6 |
+| **xA** (per player) | 🟡 ~70% | `allocation.allocate_fixture` splits `λ × ASSISTED_GOAL_FRACTION` by xA share | same as xG | 6 |
 | **a_pts** | 🟡 trivial | — | constant | 8 |
 | **E[bonus]** | 🔴 0% | bootstrap has `bps`, `bonus` (season totals) | BPS model — within-match ranking; hardest term | 10 |
 | **E[defcon]** | 🔴 0% | bootstrap has `defensive_contribution`, `clearances_blocks_interceptions`, `tackles`, `recoveries` | Threshold model → P(≥ threshold)·2 | 10 |
 | **P(start)** (gate) | 🔴 ~5% | bootstrap has `status`, `chance_of_playing_*`, `starts`, `starts_per_90` | Minutes/start-prob model; not extracted | 7 |
 | **Assembly** (the product) | 🔴 0% | typed contracts (`schemas.py`) ready | No `scoring`/`projections` module ties terms together | 8 |
 
-**Tally:** ~1 of 6 components genuinely built (`P(CS)`, team level only). Three
-constant tables are trivial-but-unwritten. `P(start)`, `E[defcon]`, `E[bonus]`
-have their raw inputs cached in bootstrap but no model. The product itself has no
-home yet.
+**Tally:** the team→player bridge and the two attacking terms (`xG`, `xA`) are now
+built (`allocation.py`); `P(CS)` is done at team level. Three constant tables are
+trivial-but-unwritten. `P(start)`, `E[defcon]`, `E[bonus]` have their raw inputs
+cached in bootstrap but no model. The product itself has no home yet.
 
-## The one structural blocker: team → player allocation
+## The structural blocker: team → player allocation — ✅ built
 
-The formula is **per-player**; the engine currently outputs **per-team** (λ, CS,
-scorelines). Nothing splits a team's expected goals/assists across its players, so
-`xG` and `xA` cannot be populated for any individual — regardless of how good the
-team λ is. This is the keystone; build it first.
+The formula is **per-player**; the engine's team_xg stage outputs **per-team** (λ,
+CS, scorelines). The bridge that splits a team's expected goals/assists across its
+players is now `allocation.py` — this was the keystone that unblocks `xG` and `xA`.
 
 Two sources, not mutually exclusive:
 
-1. **Historical shares (build first — free, cached).** Distribute team λ using each
-   player's `expected_goals_per_90` / `expected_assists_per_90` share of their
-   team's total. Zero API cost, data already in `data/raw/fpl/`. Unlocks the two
-   biggest attacking terms immediately. New module: `models/allocation.py` (or
-   `player_xg.py`).
+1. **Historical shares — ✅ built (`allocation.py`), free, cached.** Distributes
+   team λ across a squad in proportion to each player's *season-total*
+   `expected_goals` / `expected_assists` (totals, not per-90, so playing time is
+   folded in without a minutes model). Assists = `λ × ASSISTED_GOAL_FRACTION` split
+   by xA share. Zero API cost; runs end-to-end in
+   `scripts/demo_epl_market_to_xg.py`. Tested in `tests/test_allocation.py`.
+   *Remaining:* fold in expected minutes (step 7) by switching to per-90 keys × a
+   minutes weight; handle new-signing / promoted-club zero-history players.
 2. **Player props (later — paid, thin).** Anytime-goalscorer odds → implied
    per-player goal prob directly. More accurate but US-books-only, credit-costly,
    and only ~2–3 books quote each player. Endpoint researched in `ingestion/odds.py`;
    wire alongside step 5. Reuse `markets.consensus` (a yes/no pair de-vigs like a
    2-outcome h2h) and `identity.match_odds_name` for names.
-
-The historical-shares allocator is the highest-leverage next commit.
 
 ## What this formula omits vs full FPL scoring
 
@@ -142,17 +142,17 @@ against (that's what `snapshots.py` backtests are for).
 
 ## Build sequence (next commits)
 
-1. **`scoring.py` constants** — the three position→points tables + a `PlayerXPts`
+1. ✅ **`allocation.py`** — historical-shares team→player split of λ and assists,
+   from bootstrap season xG/xA. **Unlocks `xG` and `xA`.** *(steps 5–6)*
+2. **`scoring.py` constants** — the three position→points tables + a `PlayerXPts`
    schema record. Unblocks every downstream assembly. *(trivial)*
-2. **`models/allocation.py`** — historical-shares team→player split of λ and
-   assists, from bootstrap per-90 rates. **Unlocks `xG` and `xA`.** *(step 5–6)*
 3. **`P(start)` / minutes** — extract `status` + `chance_of_playing` +
    `starts_per_90` into the schema; simple start-prob first, override hook for news.
-   *(step 7)*
+   Then fold the minutes weight back into `allocation.py`. *(step 7)*
 4. **Deterministic `xPts` assembler** — multiply the terms; ship the attacking +
    CS + appearance baseline. *(step 8)*
 5. **`E[defcon]`** — P(≥ threshold)·2 from the defensive counting stats. *(step 10)*
 6. **`E[bonus]`** — BPS model; hardest, do last. *(step 10)*
 
 Steps 1–4 produce a usable, interpretable xPts baseline entirely from **already-cached
-data** — no new API spend.
+data** — no new API spend. Step 1 is done.

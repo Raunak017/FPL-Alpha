@@ -17,11 +17,11 @@ from __future__ import annotations
 import argparse
 import json
 
+from fpl_alpha.allocation import allocate_fixture, attack_rates_from_bootstrap
 from fpl_alpha.config import RAW
 from fpl_alpha.identity import match_odds_name, teams_from_bootstrap
 from fpl_alpha.ingestion import odds
 from fpl_alpha.markets import consensus
-from fpl_alpha.schemas import Team
 from fpl_alpha.team_xg import fit_team_goals
 
 
@@ -39,11 +39,11 @@ def _load_odds(markets: str, regions: str, live: bool) -> list[dict]:
     return json.loads(path.read_text())
 
 
-def _load_teams() -> list[Team]:
+def _load_bootstrap() -> dict:
     boot = RAW / "fpl" / "bootstrap-static.json"
     if not boot.exists():
         raise SystemExit(f"No cached FPL bootstrap at {boot}. Run scripts/refresh_fpl.py.")
-    return teams_from_bootstrap(json.loads(boot.read_text()))
+    return json.loads(boot.read_text())
 
 
 def main() -> None:
@@ -53,7 +53,10 @@ def main() -> None:
     ap.add_argument("--live", action="store_true", help="refresh from API (spends credits)")
     args = ap.parse_args()
 
-    teams = _load_teams()
+    boot = _load_bootstrap()
+    teams = teams_from_bootstrap(boot)
+    rates = attack_rates_from_bootstrap(boot)          # per-player xG/xA weights
+    names = {e["id"]: e["web_name"] for e in boot["elements"]}
     fixtures = odds.parse_the_odds_api_events(_load_odds(args.markets, args.regions, args.live))
     print(f"Loaded {len(fixtures)} EPL fixtures "
           f"({'LIVE' if args.live else 'cached'}, source=the-odds-api)\n")
@@ -84,7 +87,16 @@ def main() -> None:
         print(f"    P(CS): home {model.p_clean_sheet_home:5.1%}  "
               f"away {model.p_clean_sheet_away:5.1%}")
         top = sorted(model.score_dist.items(), key=lambda kv: kv[1], reverse=True)[:3]
-        print(f"    likeliest: " + "  ".join(f"{s} {p:4.1%}" for s, p in top) + "\n")
+        print(f"    likeliest: " + "  ".join(f"{s} {p:4.1%}" for s, p in top))
+
+        # Team xG -> per-player xG/xA via historical shares (steps 5-6).
+        shares = allocate_fixture(model, rates)
+        for team in (home, away):
+            recs = [r for r in shares if r.team_fpl_id == team.fpl_id]
+            top_g = sorted(recs, key=lambda r: r.exp_goals, reverse=True)[:3]
+            threat = "  ".join(f"{names.get(r.fpl_id, r.fpl_id)} {r.exp_goals:.2f}xG" for r in top_g)
+            print(f"    {team.short_name} threat: {threat}")
+        print()
 
     if unresolved:
         print(f"Unresolved names ({len(unresolved)}): {sorted(set(unresolved))}")

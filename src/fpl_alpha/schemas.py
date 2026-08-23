@@ -77,3 +77,37 @@ class TeamGoalModel:
     p_clean_sheet_home: float
     p_clean_sheet_away: float
     score_dist: dict[str, float] = field(default_factory=dict)  # "h-a" -> prob
+
+
+# --- Stage 5-6: player attacking allocation ---------------------------------
+@dataclass(frozen=True)
+class PlayerRates:
+    """Per-player attacking weights used to split a team's xG across its squad.
+
+    Sourced from FPL bootstrap-static — season totals by default (see
+    ``allocation.attack_rates_from_bootstrap``), which fold in playing time
+    without needing a separate minutes model.
+    """
+
+    fpl_id: int
+    team_fpl_id: int
+    xg: float          # expected goals   (share prior)
+    xa: float          # expected assists (share prior)
+
+
+@dataclass(frozen=True)
+class PlayerFixtureAttack:
+    """One player's market-implied attacking expectation for one fixture.
+
+    ``exp_goals`` / ``exp_assists`` are the ``xG`` / ``xA`` terms of the xPts
+    formula (see docs/XPTS_FORMULA_STATUS.md); ``*_share`` are the fractions of
+    the team total, kept for transparency/debugging.
+    """
+
+    fpl_id: int
+    fixture_id: str
+    team_fpl_id: int
+    exp_goals: float
+    exp_assists: float
+    goal_share: float = 0.0
+    assist_share: float = 0.0
