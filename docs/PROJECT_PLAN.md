@@ -4,11 +4,18 @@
 
 Build a market-informed FPL projection and optimization engine that combines official FPL data, football statistics, betting markets, expected minutes, and simulation to estimate player expected points and recommend squad decisions.
 
-## Status (as of 2026-08-20)
+> **See also:** [`XPTS_FORMULA_STATUS.md`](XPTS_FORMULA_STATUS.md) — the player
+> expected-points formula mapped term-by-term to current code, the team→player
+> allocation blocker, and why odds and FPL data are complementary (backward rates
+> vs. forward fixture-specific expectations).
 
-Steps **1–4** (the initial focus) are code-complete and unit-tested end-to-end
-**offline**; the one external gap is a live, EPL-capable odds key. Player-level
-work (steps 5+) has not started.
+## Status (as of 2026-08-21)
+
+Steps **1–4** (the initial focus) are code-complete and unit-tested end-to-end,
+running on **real cached EPL odds** from The Odds API (`soccer_epl`, verified
+2026-08-21). SportsGameOdds was dropped (its free tier paywalls EPL). Player-level
+work (steps 5+) has not started; the player-prop endpoint is researched but not
+wired (see step 2).
 
 **Legend:** ✅ done · 🟡 partial (see `[remaining: …]` in the heading) · ⬜ not started
 
@@ -37,28 +44,31 @@ Pull and normalize:
 
 *Implemented in `src/fpl_alpha/ingestion/fpl.py`, `identity.py`; run via `scripts/refresh_fpl.py`; all calls cache-first through `cache.py`.*
 
-### 2. Betting Odds Ingestion — 🟡 partial [remaining: EPL-capable API key; BTTS + player props / shots / saves / cards markets]
+### 2. Betting Odds Ingestion — 🟡 partial [remaining: BTTS; wire up player props / shots / cards (endpoint researched, see below)]
 Integrate an odds provider and collect:
 
 - ✅ Match odds (h2h) — client wired
 - ✅ Goal totals — client wired
 - ⬜ BTTS
-- ⬜ Player goal props
-- ⬜ Assist props
-- ⬜ Shots
-- ⬜ Saves
-- ⬜ Cards
+- 🟡 Player goal props — feasible & documented, not wired (see note)
+- 🟡 Assist props — feasible & documented, not wired
+- 🟡 Shots — feasible & documented, not wired
+- ⬜ Saves — no market on The Odds API for soccer
+- 🟡 Cards — feasible & documented, not wired
 
 ✅ Store raw timestamped odds snapshots — `snapshots.py` (deterministic naming + `manifest.jsonl`).
 
-*Clients in `src/fpl_alpha/ingestion/odds.py` (SportsGameOdds + The Odds API), throttled via `cache.py`; captured on a schedule by `scripts/snapshot_odds.py`. **Blocked live:** SGO EPL is paywalled on the free tier and `ODDS_API_KEY` is unset, so only cached/example data flows today.*
+*Client in `src/fpl_alpha/ingestion/odds.py` (The Odds API — sole provider; SportsGameOdds was dropped as its free tier paywalls EPL), throttled + credit-tracked via `cache.py` (`x-requests-*` headers → `data/raw/the-odds-api/_usage.json`); captured on a schedule by `scripts/snapshot_odds.py`.*
 
-### 3. No-Vig Market Probabilities — 🟡 partial [remaining: outlier handling + book weighting]
+**Player props (researched 2026-08-21, not yet built — per decision to defer to step 5).** EPL per-player markets exist but only via the *event-specific* endpoint (`/v4/sports/soccer_epl/events/{eventId}/odds`), one fixture at a time, **US bookmakers only** (`regions=us`). The `/events` list call (for event IDs) is free; each event then costs `#markets × #regions` credits (anytime goalscorer over a 10-match slate ≈ 10 credits/snapshot). Keys: `player_goal_scorer_anytime`/`_first`/`_last`, `player_assists`, `player_shots`, `player_shots_on_target`, `player_to_receive_card`/`_red_card`. Full details in the `ingestion/odds.py` header comment.
+
+### 3. No-Vig Market Probabilities — 🟡 partial [remaining: book weighting by sharpness]
 Convert bookmaker odds into fair probabilities by:
 
 - ✅ Removing bookmaker margin — `markets.devig_proportional` (proportional method)
-- ✅ Combining multiple bookmakers — `markets.consensus` (equal-weighted average)
-- 🟡 Handling outliers and missing markets — consensus averages equally for now; no outlier rejection / sharpness weighting yet
+- ✅ Combining multiple bookmakers — `markets.consensus`
+- ✅ Handling outliers — per-outcome robust center (drop high+low quote → trimmed mean, median at n=3), then renormalize; one stray book no longer skews the fair prob
+- 🟡 Book weighting — surviving books are still combined equally; sharpness weighting is the next upgrade
 
 *Implemented in `src/fpl_alpha/markets.py`; tested in `tests/test_markets.py`.*
 
@@ -81,7 +91,7 @@ Use anytime goalscorer markets and team xG to estimate:
 - Player expected goals
 - Share of team scoring
 
-*Depends on step 2 player-prop markets (needs the odds key).*
+*Depends on step 2 player-prop markets — the endpoint/keys/costs are researched (see step 2 note); wire up the event-odds client here.*
 
 ### 6. Player Assist Probabilities — ⬜ not started
 Estimate assists using:
@@ -166,11 +176,11 @@ Later extend this to:
 Start with Steps **1–4**:
 
 1. ✅ FPL data
-2. 🟡 Betting data (infrastructure done; blocked on an EPL-capable odds key)
-3. 🟡 Fair market probabilities (core done; outlier handling remaining)
+2. 🟡 Betting data (match odds live via The Odds API; player props researched, not wired)
+3. 🟡 Fair market probabilities (core + outlier handling done; sharpness weighting remaining)
 4. ✅ Market-implied team xG
 
-The step 3→4 chain runs today via `scripts/demo_market_to_xg.py` (offline example odds). Once a live odds feed is wired, `snapshot_odds.py → markets.consensus → team_xg.fit_team_goals` runs on real fixtures with no code changes. Then move into player-level projections.
+The step 2→4 chain runs today on real cached EPL odds via `scripts/demo_epl_market_to_xg.py` (`the_odds_api_epl → parse_the_odds_api_events → markets.consensus → team_xg.fit_team_goals`); `scripts/demo_market_to_xg.py` still exercises the same chain on hardcoded example odds. A scheduled `snapshot_odds.py` refresh spends credits (tracked via `cache.read_usage`). Then move into player-level projections.
 
 ## High-Level Architecture
 

@@ -19,11 +19,34 @@ from .schemas import Player, Team
 
 _POSITION = {1: "GKP", 2: "DEF", 3: "MID", 4: "FWD"}
 
+# Odds feeds carry full club names; FPL uses short forms ("Man City", "Spurs",
+# "Nott'm Forest"). The fuzzy matcher can't safely bridge that big a gap, so
+# seed the divergent clubs explicitly. Keyed by the stable FPL ``short_name``
+# code (not the display name, which FPL abbreviates) so the table survives a
+# rename. Add promoted/renamed clubs here as feeds surface new spellings.
+_EPL_TEAM_ALIASES: dict[str, tuple[str, ...]] = {
+    "BHA": ("Brighton and Hove Albion", "Brighton & Hove Albion"),
+    "LEE": ("Leeds United",),
+    "MCI": ("Manchester City",),
+    "MUN": ("Manchester United", "Man United"),
+    "NEW": ("Newcastle United",),
+    "NFO": ("Nottingham Forest",),
+    "TOT": ("Tottenham Hotspur", "Tottenham"),
+    "WOL": ("Wolverhampton Wanderers", "Wolves"),
+}
+
 
 def teams_from_bootstrap(bootstrap: dict[str, Any]) -> list[Team]:
-    """Normalize bootstrap-static 'teams' into canonical Team records."""
+    """Normalize bootstrap-static 'teams' into canonical Team records, attaching
+    known odds-feed aliases (see ``_EPL_TEAM_ALIASES``) so long club names from
+    betting feeds resolve to the right FPL id."""
     return [
-        Team(fpl_id=t["id"], name=t["name"], short_name=t["short_name"])
+        Team(
+            fpl_id=t["id"],
+            name=t["name"],
+            short_name=t["short_name"],
+            aliases=_EPL_TEAM_ALIASES.get(t["short_name"], ()),
+        )
         for t in bootstrap["teams"]
     ]
 

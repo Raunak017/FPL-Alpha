@@ -19,29 +19,51 @@ per-provider budgets defined in `fpl_alpha.config` (`ProviderLimits`). Never
 call `urllib`/`requests` directly from a stage; never add a call that bypasses
 `cache.py`.
 
-### SportsGameOdds — the tightest constraint, handle with most care
-- **The free tier does NOT include EPL.** Live test returned:
-  `400 "The leagueID EPL is unavailable at your current subscription tier. Upgrade to unlock"`.
-  So on the current key we **cannot pull EPL odds at all** without upgrading.
-- Documented free-tier limits (when a league IS available): ~**2,500 objects/month**,
-  **10 requests/minute**, ~**10-minute** odds refresh. Billing is **per match-object**
-  (one fixture with hundreds of markets = one object), so a full slate of ~10 EPL matches
-  is ~10 objects per snapshot.
-- **Rules for this repo:**
-  - Never exceed **10 req/min** (`SPORTSGAMEODDS.min_interval_s = 6.0` in `config.py`).
-  - Treat the monthly object budget as scarce: at most a **handful of snapshots per gameweek**
-    (e.g. Mon / Wed / Fri / deadline-day), never a live loop.
-  - Odds only refresh every ~10 min upstream, so polling faster buys nothing but burns quota.
-  - Always write the response to `data/` and develop against the cached file.
-- Key lives in `.env` as `SPORTSGAMEODDS_API_KEY` (gitignored). Auth via `X-Api-Key` header
-  **or** `?apiKey=` query param. List valid leagues: `GET /v2/leagues/`.
-
-### The Odds API (fallback for EPL odds)
+### The Odds API — our one EPL odds source, the tightest constraint
+This is the **only** odds provider now (SportsGameOdds was dropped — its free
+tier paywalls EPL). Handle its budget with the most care.
 - Free tier ≈ **500 credits/month**. **Credits are consumed per request as
-  `#markets × #regions`** — e.g. `markets=h2h,totals` + `regions=uk,eu` = **4 credits/call**.
-  This multiplies fast; request only the markets/regions you actually need.
-- Soccer player props are currently **US-bookmaker only** on this API.
+  `#markets × #regions`** — e.g. `markets=h2h,totals` + `regions=uk,eu` = **4 credits/call**
+  (historical requests cost **×10**). This multiplies fast; request only the
+  markets/regions a downstream stage actually consumes.
+- **The API reports your budget back to you.** Every live response carries
+  `x-requests-remaining`, `x-requests-used`, and `x-requests-last` (cost of that
+  call). `cache.py` records these to `data/raw/the-odds-api/_usage.json` and logs
+  a warning once remaining dips below `THE_ODDS_API.low_budget_threshold` (50).
+  Read the running total with `cache.read_usage("the-odds-api")`; treat that
+  count as authoritative, not any counter we keep ourselves.
+- **Rules for this repo:**
+  - Throttle is `THE_ODDS_API.min_interval_s = 2.0` and the cache TTL is 10 min
+    in `config.py` — tighten, never loosen.
+  - At most a **handful of snapshots per gameweek** (e.g. Mon / Wed / Fri /
+    deadline-day), never a live loop. Always develop against the cached file.
+- **Player props (feasible, not yet built).** Per-player markets exist for EPL
+  but only via the *event-specific* endpoint, one fixture at a time, and only
+  from **US bookmakers** (`regions=us`):
+  `GET /v4/sports/soccer_epl/events/{eventId}/odds?regions=us&markets=player_goal_scorer_anytime,...`.
+  Get the `{eventId}`s from `GET /v4/sports/soccer_epl/events` first — that list
+  call is **free** (no credits) — then spend `#markets × #regions` **per event**
+  (anytime-goalscorer over a 10-match slate ≈ 10 credits/snapshot). Available
+  keys: `player_goal_scorer_anytime`/`_first`/`_last`, `player_assists`,
+  `player_shots`, `player_shots_on_target`, `player_to_receive_card`/`_red_card`.
+  See the header comment in `ingestion/odds.py`; wire up alongside Plan step 5.
 - Key: `.env` → `ODDS_API_KEY`.
+
+### Consolidating many bookmakers into one number
+The Odds API returns **raw per-bookmaker prices with no consensus of its own**
+(a single EPL fixture can list ~20 books). Our consolidation is
+`markets.consensus`: de-vig each book independently, then combine per outcome
+with an **outlier-resistant center** (drop the highest and lowest quote, average
+the rest — a symmetric trimmed mean that degrades to the median for 3 books and
+the plain mean for ≤2), renormalized to a valid distribution. This keeps one
+stray/slow book from skewing the fair probability, which matters most for thin
+markets like player props quoted by only 2–3 US books.
+
+### Official FPL API (no key, but still be polite)
+- Not formally documented; no published rate limit, but the endpoint **can soft-ban an IP**
+  that hammers it. Keep it to **≤ ~1 req/sec**, send a real `User-Agent`, and cache.
+- `bootstrap-static` already includes xG/xA/xGI, expected goals conceded, defensive
+  contributions, prices, ownership, status/news — so **prefer it over scraping Understat/FBref**.
 
 ### Official FPL API (no key, but still be polite)
 - Not formally documented; no published rate limit, but the endpoint **can soft-ban an IP**
@@ -52,7 +74,7 @@ call `urllib`/`requests` directly from a stage; never add a call that bypasses
 ## Developers (2)
 
 - **dev1 — Rushi Pardeshi.** FPL Team ID `432989` (team name "KanteGetAnyWorse", USA).
-  Owns the current SportsGameOdds key.
+  Owns the current The Odds API key.
 - **dev2 — TBD.** Add their FPL Team ID to `.env` as `FPL_TEAM_ID_DEV2` when known.
 
 ## Data layers & access
@@ -64,35 +86,8 @@ call `urllib`/`requests` directly from a stage; never add a call that bypasses
 | Manager squad/history | `/api/entry/{id}/`, `/history/`, `/event/{gw}/picks/` | none (public by Team ID) | ✅ (picks public only after a GW locks) |
 | Football xG stats | FPL bootstrap (primary); FBref (secondary) | none | ✅ FPL / ⚠️ FBref scrape with care |
 | Understat xG | understat.com | none | ⛔ anti-bot gated now |
-| Betting odds | SportsGameOdds / The Odds API | **API key** | 🔑 SGO EPL paywalled; Odds API key not set |
-
-## Layout
-
-```
-FPL-Alpha/
-├── CLAUDE.md                 # this file
-├── README.md  AGENTS.md      # quickstart / working conventions
-├── pyproject.toml
-├── .env / .env.example       # secrets + team IDs (.env gitignored)
-├── .gitignore
-│
-├── src/fpl_alpha/
-│   ├── config.py             # env + paths + per-provider rate-limit budgets
-│   ├── cache.py              # cache-first, throttled HTTP gateway (the one choke point)
-│   ├── snapshots.py          # timestamped odds/FPL captures + manifest
-│   ├── schemas.py            # typed data contracts between pipeline stages
-│   ├── ingestion/            # fpl.py · odds.py · stats.py            (steps 1–2)
-│   ├── identity.py           # canonical FPL ids + odds-name matching  (identity layer)
-│   ├── markets.py            # de-vig + consensus                      (step 3)
-│   ├── team_xg.py            # market-implied Poisson team goals       (step 4)
-│   └── models/               # player-level models                    (steps 5+, empty)
-│
-├── scripts/                  # refresh_fpl.py · snapshot_odds.py
-├── tests/                    # pytest (no-vig math covered)
-├── notebooks/
-├── docs/                     # PROJECT_PLAN.md (the 12-step roadmap)
-└── data/{raw,processed,snapshots}/   # cached API JSON (gitignored)
-```
+| Betting odds (EPL match) | The Odds API (`soccer_epl`, featured `/odds`) | **API key** (`ODDS_API_KEY`) | ✅ working — decimal odds; live EPL source (verified 2026-08-21) |
+| Betting odds (EPL player props) | The Odds API (event `/events/{id}/odds`, `regions=us`) | **API key** (`ODDS_API_KEY`) | 🟡 feasible, not built — US books only, per-event credit cost (see odds.py) |
 
 Downstream stages (`simulation`, `scoring`, `projections`, `optimization`,
 `evaluation`) are added when reached — the plan reserves the names, but empty
@@ -106,7 +101,7 @@ pip install -e ".[dev]"
 cp .env.example .env          # add keys / team ids as available
 
 python scripts/refresh_fpl.py         # cache FPL bootstrap + fixtures (cache-first)
-python scripts/snapshot_odds.py --provider the-odds-api \
+python scripts/snapshot_odds.py \
     --scope epl-gw1 --captured-at 2026-08-21T17:30:00Z   # scheduled odds snapshot
 pytest                                 # runs the no-vig math tests
 ```

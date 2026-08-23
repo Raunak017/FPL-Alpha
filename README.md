@@ -49,7 +49,7 @@ pytest                             # runs the unit tests
 
 ## Developers
 
-- **dev1 — Rushi Pardeshi.** FPL Team ID `432989`. Owns the SportsGameOdds key.
+- **dev1 — Rushi Pardeshi.** FPL Team ID `432989`. Owns the The Odds API key.
 - **dev2 — TBD.** Add their Team ID to `.env` as `FPL_TEAM_ID_DEV2`.
 
 Working conventions and module ownership live in [`AGENTS.md`](AGENTS.md).

@@ -31,6 +31,27 @@ class Player:
     aliases: tuple[str, ...] = ()
 
 
+# --- Stage 2: normalized fixture odds (ingestion -> markets handoff) --------
+@dataclass(frozen=True)
+class FixtureOdds:
+    """One fixture's decimal odds, aligned per book, ready for de-vig/consensus.
+
+    Produced by the odds ingestion parsers (provider-specific JSON in, this
+    normalized shape out) and consumed by ``markets.consensus``. Each row in
+    ``h2h``/``totals`` is one book's decimal prices in a fixed outcome order:
+    ``h2h`` -> [home, draw, away]; ``totals`` -> [over, under] at ``totals_line``.
+    """
+
+    source: str            # e.g. "the-odds-api"
+    event_id: str
+    commence_time: str     # ISO-8601 kickoff (from the feed, not generated)
+    home_team: str         # odds-feed name; resolve to FPL id via identity
+    away_team: str
+    h2h: list[list[float]] = field(default_factory=list)
+    totals: list[list[float]] = field(default_factory=list)
+    totals_line: float | None = None
+
+
 # --- Stage 3: no-vig market probabilities -----------------------------------
 @dataclass(frozen=True)
 class MarketProb:

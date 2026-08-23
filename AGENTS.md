@@ -9,8 +9,10 @@ Guidance for both developers and any AI coding agents on this repo. See
    `fpl_alpha.cache.fetch`. Never call `urllib`/`requests` directly from a
    stage. Never add a polling loop against any API.
 2. **Respect the budgets.** Rate limits live in `config.py` (`ProviderLimits`).
-   Tighten them, never loosen. SportsGameOdds EPL is paywalled on the free tier;
-   The Odds API bills `#markets × #regions` per call — request only what you use.
+   Tighten them, never loosen. The Odds API (our only odds source) bills
+   `#markets × #regions` per call against a ~500-credit/mo free tier — request
+   only what you use. `cache.py` tracks the real remaining credits from the
+   API's `x-requests-*` response headers and warns when the budget runs low.
 3. **Secrets only in `.env`** (gitignored). Never hardcode keys; never commit
    `data/`.
 4. **No speculative abstractions.** Start each new stage as a single module;
