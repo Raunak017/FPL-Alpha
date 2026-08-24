@@ -21,3 +21,6 @@ venv/
 
 # Notebooks
 .ipynb_checkpoints/
+
+# macOS
+.DS_Store
