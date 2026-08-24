@@ -9,6 +9,7 @@ description = "Market-informed FPL projection and optimization engine"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "duckdb>=1.0",
     # Stdlib-only through step 4 (ingestion, no-vig, team-xG all pure Python).
     # Add deps as later stages need them:
     #   numpy/scipy  -> Monte Carlo simulation + Dixon–Coles xG upgrade (steps 4, 9)

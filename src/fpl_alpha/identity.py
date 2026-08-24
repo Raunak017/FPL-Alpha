@@ -13,9 +13,10 @@ from __future__ import annotations
 import unicodedata
 from collections.abc import Iterable
 from difflib import SequenceMatcher
+from datetime import datetime
 from typing import Any
 
-from .schemas import Player, Team
+from .schemas import Player, PlayerSnapshot, Team
 
 _POSITION = {1: "GKP", 2: "DEF", 3: "MID", 4: "FWD"}
 
@@ -44,6 +45,59 @@ def players_from_bootstrap(bootstrap: dict[str, Any]) -> list[Player]:
             )
         )
     return out
+
+
+def player_snapshots_from_bootstrap(
+    bootstrap: dict[str, Any], captured_at: datetime
+) -> list[PlayerSnapshot]:
+    """Normalize bootstrap-static's time-varying player state.
+
+    ``captured_at`` is supplied by the caller. For cached bootstrap data it is
+    the local cache file write time, not an FPL-provided timestamp.
+    """
+    return [
+        PlayerSnapshot(
+            player_fpl_id=e["id"],
+            captured_at=captured_at,
+            now_cost=e["now_cost"],
+            selected_by_percent=float(e["selected_by_percent"]),
+            status=e["status"],
+            total_points=e["total_points"],
+            points_per_game=float(e["points_per_game"]),
+            form=float(e["form"]),
+            minutes=e["minutes"],
+            starts=e["starts"],
+            goals_scored=e["goals_scored"],
+            assists=e["assists"],
+            clean_sheets=e["clean_sheets"],
+            bonus=e["bonus"],
+            bps=e["bps"],
+            expected_goals=float(e["expected_goals"]),
+            expected_assists=float(e["expected_assists"]),
+            expected_goal_involvements=float(e["expected_goal_involvements"]),
+            expected_goals_conceded=float(e["expected_goals_conceded"]),
+            clean_sheets_per_90=float(e["clean_sheets_per_90"]),
+            defensive_contribution_per_90=float(e["defensive_contribution_per_90"]),
+            expected_goals_per_90=float(e["expected_goals_per_90"]),
+            expected_assists_per_90=float(e["expected_assists_per_90"]),
+            expected_goal_involvements_per_90=float(e["expected_goal_involvements_per_90"]),
+            expected_goals_conceded_per_90=float(e["expected_goals_conceded_per_90"]),
+            goals_conceded_per_90=float(e["goals_conceded_per_90"]),
+            saves_per_90=float(e["saves_per_90"]),
+            starts_per_90=float(e["starts_per_90"]),
+            influence=float(e["influence"]),
+            creativity=float(e["creativity"]),
+            threat=float(e["threat"]),
+            ict_index=float(e["ict_index"]),
+            chance_of_playing_next_round=e.get("chance_of_playing_next_round"),
+            chance_of_playing_this_round=e.get("chance_of_playing_this_round"),
+            transfers_in_event=e["transfers_in_event"],
+            transfers_out_event=e["transfers_out_event"],
+            transfers_in=e["transfers_in"],
+            transfers_out=e["transfers_out"],
+        )
+        for e in bootstrap["elements"]
+    ]
 
 
 def _norm(s: str) -> str:

@@ -4,7 +4,7 @@
 
 Build a market-informed FPL projection and optimization engine that combines official FPL data, football statistics, betting markets, expected minutes, and simulation to estimate player expected points and recommend squad decisions.
 
-## Status (as of 2026-08-20)
+## Status (as of 2026-08-23)
 
 Steps **1–4** (the initial focus) are code-complete and unit-tested end-to-end
 **offline**; the one external gap is a live, EPL-capable odds key. Player-level
@@ -14,7 +14,7 @@ work (steps 5+) has not started.
 
 | Step | Status |
 |------|--------|
-| 1. FPL Data Ingestion | 🟡 partial |
+| 1. FPL Data Ingestion | ✅ done |
 | 2. Betting Odds Ingestion | 🟡 partial |
 | 3. No-Vig Market Probabilities | 🟡 partial |
 | 4. Market-Implied Team xG | ✅ done |
@@ -22,20 +22,61 @@ work (steps 5+) has not started.
 
 ## Roadmap
 
-### 1. FPL Data Ingestion — 🟡 partial [remaining: normalize player-history & detailed FPL stats into schemas]
+### 1. FPL Data Ingestion — ✅ done
 Pull and normalize:
 
 - ✅ Players — `identity.players_from_bootstrap`
 - ✅ Teams — `identity.teams_from_bootstrap`
 - ✅ Fixtures — `ingestion.fpl.fixtures`
-- ✅ Prices — `Player.now_cost`
+- ✅ Prices, ownership, status, transfers, season stats, xG/xA/xGI/xGC, per-90, and ICT — timestamped `PlayerSnapshot` records
 - ✅ Positions — `element_type` → GKP/DEF/MID/FWD
-- 🟡 FPL statistics — pulled & cached in bootstrap-static; not yet extracted into typed records
-- 🟡 Player history — fetchable via `ingestion.fpl.element_summary`; not yet normalized
+- ✅ Current-season player fixture history — `PlayerGameweekHistory`, keyed by `(player_fpl_id, fixture_fpl_id)`
+- ✅ DuckDB persistence — `data/fpl_alpha.duckdb`, with atomic refresh transactions for `teams`, `players`, `fixtures`, `player_snapshots`, and `player_gameweek_history`
 
 ✅ Canonical player and team IDs established (FPL is the source of truth).
 
-*Implemented in `src/fpl_alpha/ingestion/fpl.py`, `identity.py`; run via `scripts/refresh_fpl.py`; all calls cache-first through `cache.py`.*
+*Implemented in `src/fpl_alpha/ingestion/fpl.py`, `identity.py`, and `storage.py`; run via `scripts/refresh_fpl.py`; all API calls are cache-first through `cache.py`.*
+
+#### Populate the local FPL database
+
+Run the normal refresh after installing the project dependencies:
+
+```bash
+python scripts/refresh_fpl.py
+```
+
+This creates or updates `data/fpl_alpha.duckdb`. It fetches stale/missing
+`bootstrap-static` and fixture data, then stores canonical teams/players,
+fixtures, and a timestamped player snapshot. The snapshot timestamp is the
+local bootstrap cache write time, not an FPL-provided timestamp.
+
+For player fixture history, the refresh processes only gameweeks whose bootstrap
+event has both `finished=true` and `data_checked=true`. Each such gameweek is
+read once from `/event/{gw}/live/` and marked ingested transactionally, so later
+refreshes do not repeat that request. Team fixture schedules identify blanks,
+single-fixture gameweeks, and double gameweeks; only double-gameweek players use
+the cache-first `/element-summary/{player}/` fallback for per-fixture stats.
+
+Before the first finalized gameweek, expect `player_gameweek_history` to be
+empty. The official API does not provide a bulk prior-season fixture-history
+endpoint; pre-season bootstrap data can still contain prior-season aggregate
+stats in `player_snapshots`.
+
+Inspect stored table sizes with:
+
+```bash
+python - <<'PY'
+import duckdb
+
+connection = duckdb.connect("data/fpl_alpha.duckdb", read_only=True)
+for table in (
+    "teams", "players", "fixtures", "player_snapshots",
+    "player_gameweek_history",
+):
+    print(table, connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
+connection.close()
+PY
+```
 
 ### 2. Betting Odds Ingestion — 🟡 partial [remaining: EPL-capable API key; BTTS + player props / shots / saves / cards markets]
 Integrate an odds provider and collect:
