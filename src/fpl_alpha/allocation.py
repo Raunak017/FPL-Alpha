@@ -26,11 +26,23 @@ xA/xG ratio is a natural later refinement.
 Pure stdlib. The share math (:func:`allocate`) is source-agnostic and unit-tested
 independently of any bootstrap parsing.
 
+Availability gate
+-----------------
+Before allocating, each player's weight is scaled by an availability factor from
+FPL's own injury/suspension signals (``status`` + ``chance_of_playing_next_round``).
+An injured player (factor 0) drops out entirely and — because :func:`allocate`
+renormalizes over the survivors — *his share flows to the teammates who will
+actually play*, rather than vanishing. Doubtful players (e.g. 75%) get a reduced
+share. This is the fitness half of the ``P(start)`` term; it does not yet model
+rotation (a fit-but-benched player still gets full weight — that needs the
+minutes model, Plan step 7).
+
 Known baseline limitations (addressed by step 7 + manual overrides)
 -------------------------------------------------------------------
 - Pre-season, shares come from *last* season, so new signings / promoted-club
   players with no history get ~0 share until this season's stats accrue.
-- No minutes/rotation adjustment yet; a rested starter is over-credited.
+- Availability only captures *fitness*, not *rotation*; a fit squad player who
+  won't start is still over-credited until the minutes model lands.
 """
 from __future__ import annotations
 
@@ -42,6 +54,22 @@ from .schemas import PlayerFixtureAttack, PlayerRates, TeamGoalModel
 # Share of goals that earn an FPL assist (~3 in 4 league-wide). Tunable; a
 # per-team xA/xG ratio would be more precise but noisier for thin/promoted sides.
 ASSISTED_GOAL_FRACTION = 0.75
+
+# FPL status codes that mean "not available" when no explicit chance-% is given.
+_UNAVAILABLE_STATUS = frozenset({"i", "s", "u", "n"})  # injured/suspended/unavailable/not-in-squad
+
+
+def availability_factor(status: str | None, chance_next: float | int | None) -> float:
+    """Fitness weight in [0, 1] from FPL availability signals.
+
+    ``chance_of_playing_next_round`` (0/25/50/75/100) is authoritative when
+    present. Otherwise: injured/suspended/unavailable → 0.0; everything else
+    (available, or an unlabelled doubt) → 1.0. This gates *fitness* only, not
+    rotation — see the module docstring.
+    """
+    if chance_next is not None:
+        return max(0.0, min(1.0, float(chance_next) / 100.0))
+    return 0.0 if status in _UNAVAILABLE_STATUS else 1.0
 
 
 def allocate(team_total: float, weights: Mapping[int, float]) -> dict[int, float]:
@@ -80,8 +108,10 @@ def allocate_fixture(
         (model.away_team_fpl_id, model.lambda_away),
     ):
         squad = {i: r for i, r in rates.items() if r.team_fpl_id == team_id}
-        g_weights = {i: r.xg for i, r in squad.items()}
-        a_weights = {i: r.xa for i, r in squad.items()}
+        # Availability scales the share weight: an injured player (available=0)
+        # drops out and allocate() redistributes his share to fit teammates.
+        g_weights = {i: r.xg * r.available for i, r in squad.items()}
+        a_weights = {i: r.xa * r.available for i, r in squad.items()}
         goals = allocate(lam, g_weights)
         assists = allocate(lam * assisted_fraction, a_weights)
         g_total = sum(g_weights.values())
@@ -114,6 +144,7 @@ def attack_rates_from_bootstrap(
     *,
     goal_key: str = "expected_goals",
     assist_key: str = "expected_assists",
+    gate_availability: bool = True,
 ) -> dict[int, PlayerRates]:
     """Extract per-player attacking weights from bootstrap-static ``elements``.
 
@@ -121,6 +152,10 @@ def attack_rates_from_bootstrap(
     Pass ``goal_key="expected_goals_per_90"`` / ``assist_key="expected_assists_per_90"``
     to weight by rate instead — but note per-90 over-credits low-minute cameos, so
     only do that once an expected-minutes weight is applied on top (step 7).
+
+    ``gate_availability`` (default on) records each player's fitness weight from
+    ``status`` + ``chance_of_playing_next_round`` (see :func:`availability_factor`);
+    set it False to ignore injuries (e.g. to reproduce the pre-gate behaviour).
     """
     return {
         e["id"]: PlayerRates(
@@ -128,6 +163,11 @@ def attack_rates_from_bootstrap(
             team_fpl_id=e["team"],
             xg=_to_float(e.get(goal_key)),
             xa=_to_float(e.get(assist_key)),
+            available=(
+                availability_factor(e.get("status"), e.get("chance_of_playing_next_round"))
+                if gate_availability
+                else 1.0
+            ),
         )
         for e in bootstrap["elements"]
     }

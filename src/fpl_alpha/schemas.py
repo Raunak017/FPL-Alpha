@@ -93,6 +93,7 @@ class PlayerRates:
     team_fpl_id: int
     xg: float          # expected goals   (share prior)
     xa: float          # expected assists (share prior)
+    available: float = 1.0  # fitness weight in [0,1] from FPL status/chance-of-playing
 
 
 @dataclass(frozen=True)

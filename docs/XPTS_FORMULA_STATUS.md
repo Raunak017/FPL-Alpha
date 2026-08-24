@@ -42,7 +42,7 @@ fetch them per-run. Position order is GKP / DEF / MID / FWD.
 | **a_pts** | 🟡 trivial | — | constant | 8 |
 | **E[bonus]** | 🔴 0% | bootstrap has `bps`, `bonus` (season totals) | BPS model — within-match ranking; hardest term | 10 |
 | **E[defcon]** | 🔴 0% | bootstrap has `defensive_contribution`, `clearances_blocks_interceptions`, `tackles`, `recoveries` | Threshold model → P(≥ threshold)·2 | 10 |
-| **P(start)** (gate) | 🔴 ~5% | bootstrap has `status`, `chance_of_playing_*`, `starts`, `starts_per_90` | Minutes/start-prob model; not extracted | 7 |
+| **P(start)** (gate) | 🟡 ~40% | `allocation.availability_factor` gates the *fitness* half (injuries/suspensions) from `status` + `chance_of_playing_next_round`; wired into allocation | Rotation/minutes model (a fit benchwarmer still gets full weight) | 7 |
 | **Assembly** (the product) | 🔴 0% | typed contracts (`schemas.py`) ready | No `scoring`/`projections` module ties terms together | 8 |
 
 **Tally:** the team→player bridge and the two attacking terms (`xG`, `xA`) are now
@@ -71,6 +71,33 @@ Two sources, not mutually exclusive:
    and only ~2–3 books quote each player. Endpoint researched in `ingestion/odds.py`;
    wire alongside step 5. Reuse `markets.consensus` (a yes/no pair de-vigs like a
    2-outcome h2h) and `identity.match_odds_name` for names.
+
+### Availability gate (fitness half of `P(start)`) — ✅ built
+
+`allocation.availability_factor(status, chance_of_playing_next_round)` scales each
+player's weight in [0,1] before allocating: injured/suspended → 0, doubtful (75%)
+→ 0.75. A zeroed player drops out and `allocate` renormalizes, so **his share
+flows to the teammates who'll actually play** (verified: an injured striker no
+longer leads his team's threat list). Gates *fitness* only — a fit-but-rotated
+player still gets full weight until the minutes model (step 7). Refresh the
+bootstrap cache near the deadline (`refresh_fpl.py --force`) so injury news is
+current — the gate is only as fresh as the cache.
+
+### Sanity check vs FPL `ep_next` (GW1)
+
+`scripts/compare_ep_next.py` computes a *partial* xPts (appearance + attacking +
+clean sheet; **no** bonus/defcon/saves) and lines it up against FPL's own
+`ep_next`. Findings on the cached GW1 slate:
+
+- **Directionally sound.** Spearman ≈ 0.67 across all players; premium attackers
+  (B.Fernandes, Haaland, Saka, Mbeumo, Gakpo) rank high in both.
+- **Systematic under-count** at every position (GKP −0.9, MID −0.4, FWD −0.5,
+  DEF −0.3) — exactly the missing positive terms (bonus, defcon, and saves for
+  GKs, the biggest gap). Confirms *what* is left to build, not a bug.
+- **Thin-squad artifact.** Allocation over-concentrates in weak/promoted squads:
+  Ipswich carry only 3.0 total last-season xG, 74% of it Lukić's, so he absorbs
+  ~74% of their goals and tops our list at 9.1 partial xPts vs `ep_next` 1.5. A
+  minutes model + shrinkage toward a positional prior is the fix (step 7).
 
 ## What this formula omits vs full FPL scoring
 
