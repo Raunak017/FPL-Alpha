@@ -1,47 +1,36 @@
-# AGENTS.md — working conventions
+# FPL Alpha Project Instructions
 
-Guidance for both developers and any AI coding agents on this repo. See
-[`CLAUDE.md`](CLAUDE.md) for the authoritative data-access + rate-limit rules.
+FPL Alpha is a market-informed Fantasy Premier League projection and optimization engine.
 
-## Non-negotiables
+## Working Style
 
-1. **Cache-first, always.** Every external request goes through
-   `fpl_alpha.cache.fetch`. Never call `urllib`/`requests` directly from a
-   stage. Never add a polling loop against any API.
-2. **Respect the budgets.** Rate limits live in `config.py` (`ProviderLimits`).
-   Tighten them, never loosen. SportsGameOdds EPL is paywalled on the free tier;
-   The Odds API bills `#markets × #regions` per call — request only what you use.
-3. **Secrets only in `.env`** (gitignored). Never hardcode keys; never commit
-   `data/`.
-4. **No speculative abstractions.** Start each new stage as a single module;
-   promote to a package only when it genuinely needs multiple files. Do not
-   pre-create empty folders to match the plan's target tree.
+- Keep replies very short and concise.
+- Prefer implementation over long explanations.
+- Do not explain work in progress; report only after the task is complete.
+- Do not repeat information already established in the conversation or repository.
+- Ask questions only when genuinely blocked; otherwise make a reasonable assumption and proceed.
 
-## Pipeline & the data contract
+## Token Efficiency
 
-The engine is a linear DAG. Each stage consumes the previous stage's output as
-defined in `schemas.py` — build against those records, not raw dicts, so the two
-stages can be developed in parallel.
+- Use tokens conservatively.
+- Do not run unnecessary verification, validation, linting, builds, or test suites.
+- Run only checks needed to validate the specific change.
+- Prefer targeted tests over full test suites.
+- Avoid repeatedly inspecting files or performing broad repository searches.
+- Keep command output brief.
+- Do not generate unnecessary documentation or comments.
 
-```
-ingestion → identity → markets → team_xg → models → simulation
-          → scoring → projections → optimization → evaluation
-```
+## Implementation Guidance
 
-## Rough ownership (steps 1–4)
+- Follow the roadmap and architecture in `Plan.md`.
+- Keep ingestion, identity mapping, market normalization, probability models, simulation, scoring, projections, and optimization modular.
+- Use deterministic tests and seeded simulations where applicable.
+- Keep credentials and secrets out of the repository; use `.env.example` for configuration documentation.
+- Preserve existing user changes and avoid unrelated edits.
 
-| Area | Modules | Notes |
-|------|---------|-------|
-| Ingestion | `ingestion/fpl.py`, `ingestion/odds.py` | cache-first clients |
-| Identity | `identity.py` | odds-name ↔ FPL-id matching is the hard part |
-| Markets | `markets.py` | de-vig + consensus (math is unit-tested) |
-| Team xG | `team_xg.py` | Poisson solver from match markets |
+## Completion Report
 
-## Conventions
+At completion, report only:
 
-- Python ≥ 3.11, `from __future__ import annotations`, type hints on public fns.
-- Keep ingestion stdlib-only; add deps per stage (see `pyproject.toml` comments).
-- Tests for any non-trivial math (`tests/`). Run `pytest` before pushing.
-- Timestamps are passed in explicitly (see `snapshots.py`) — never generated
-  inline — so runs stay reproducible.
-- Unresolved name matches must be logged, never silently dropped.
+- What changed
+- Anything still unresolved
