@@ -14,10 +14,14 @@ Build a market-informed FPL projection and optimization engine that combines off
 Steps **1–4** (the initial focus) are code-complete and unit-tested end-to-end,
 running on **real cached EPL odds** from The Odds API (`soccer_epl`, verified
 2026-08-21). SportsGameOdds was dropped (its free tier paywalls EPL). Player-level
-work has begun: steps **5–6** now have a baseline **historical-shares allocator**
-(`allocation.py`) that splits market team xG into per-player xG/xA from cached FPL
-data — no new API spend. Steps 7+ (minutes, deterministic xPts, simulation) not
-started; the player-prop endpoint is researched but not wired (see step 2).
+work has begun: steps **5–7** now have a baseline **historical-shares allocator**
+(`allocation.py`) — splitting market team xG into per-player xG/xA — plus an
+**expected-minutes model** (`minutes.py`) with empirical-Bayes shrinkage that gates
+injuries, discounts rotation, and pulls thin-history players toward a positional
+prior (fixing the promoted-squad over-concentration). All from cached FPL data, no
+new API spend; validated against FPL `ep_next` (`scripts/compare_ep_next.py`,
+Spearman ≈ 0.70). Steps 8+ (deterministic xPts, simulation) not started; the
+player-prop endpoint is researched but not wired (see step 2).
 
 **Legend:** ✅ done · 🟡 partial (see `[remaining: …]` in the heading) · ⬜ not started
 
@@ -29,7 +33,8 @@ started; the player-prop endpoint is researched but not wired (see step 2).
 | 4. Market-Implied Team xG | ✅ done |
 | 5. Player Goal Probabilities | 🟡 partial |
 | 6. Player Assist Probabilities | 🟡 partial |
-| 7–12 (minutes → optimizer) | ⬜ not started |
+| 7. Expected Minutes Model | 🟡 partial |
+| 8–12 (deterministic xPts → optimizer) | ⬜ not started |
 
 ## Roadmap
 
@@ -129,35 +134,37 @@ Use match markets to estimate:
 
 *Implemented in `src/fpl_alpha/team_xg.py`; tested in `tests/test_team_xg.py`; end-to-end demo `scripts/demo_market_to_xg.py`. Planned refinement (not blocking): Dixon–Coles low-score correction.*
 
-### 5. Player Goal Probabilities — 🟡 partial [remaining: minutes weighting (step 7); player-prop source]
+### 5. Player Goal Probabilities — 🟡 partial [remaining: calibrate priors; emit goal-prob field; player-prop source]
 Use team xG and per-player shares to estimate:
 
-- ✅ Player expected goals — `allocation.allocate_fixture` splits team λ by each player's season `expected_goals` share
+- ✅ Player expected goals — `allocation.attack_weights_from_bootstrap` (shrunk per-90 rate × expected minutes) split by `allocate_fixture`
 - ✅ Share of team scoring — `PlayerFixtureAttack.goal_share`
+- ✅ Minutes / rotation & thin-history handling — via the step-7 model + shrinkage (no longer over-concentrates on promoted squads)
 - 🟡 Goal probability — derivable from `exp_goals` via Poisson (`1 − e^(−xG)`); not yet emitted as a field
-- 🟡 Accuracy — shares are last-season totals (no minutes/rotation adjustment yet; new signings get ~0 share)
 
-*Baseline built from **already-cached** bootstrap data (zero API spend), in `src/fpl_alpha/allocation.py`; tested in `tests/test_allocation.py`; runs end-to-end in `scripts/demo_epl_market_to_xg.py`. Player-prop markets (researched, see step 2) are an optional higher-accuracy source to layer in later.*
+*Baseline built from **already-cached** bootstrap data (zero API spend), in `src/fpl_alpha/allocation.py` (+ `minutes.py`); tested in `tests/test_allocation.py`; runs end-to-end in `scripts/demo_epl_market_to_xg.py`. Player-prop markets (researched, see step 2) are an optional higher-accuracy source to layer in later.*
 
 ### 6. Player Assist Probabilities — 🟡 partial [remaining: minutes weighting; per-team assist ratio]
 Estimate assists using:
 
-- ✅ xA / chance creation — `allocation.allocate_fixture` splits a team assist budget by each player's season `expected_assists` share
+- ✅ xA / chance creation — splits a team assist budget by each player's shrunk, minutes-weighted `expected_assists` share
 - ✅ Team expected goals — assist budget = `team λ × ASSISTED_GOAL_FRACTION` (~0.75 of goals are assisted)
-- 🟡 Player role — implicit via xA share only; no explicit role model
+- 🟡 Player role — implicit via xA share + positional prior; no explicit role model
 - ⬜ Assist markets — not wired (see step 2 player props)
 
-*Shares the `allocation.py` implementation with step 5.*
+*Shares the `allocation.py` + `minutes.py` implementation with step 5.*
 
-### 7. Expected Minutes Model — ⬜ not started
+### 7. Expected Minutes Model — 🟡 partial [remaining: calibrate priors; sub/rotation risk; manual line-up overrides]
 Estimate:
 
-- Start probability
-- Expected minutes
-- Early substitution risk
-- Rotation risk
+- ✅ Start probability — `minutes.start_probability` (shrunk last-season start rate, fitness-gated)
+- ✅ Expected minutes — `minutes.expected_minutes` (EB shrinkage of last-season minutes toward a prior)
+- ✅ Availability gate — `minutes.availability_factor` from `status` + `chance_of_playing_next_round` (injured/suspended → 0)
+- ✅ Thin-history shrinkage — `allocation.attack_weights_from_bootstrap` pulls sparse/promoted players to a positional prior, fixing the over-concentration artifact
+- 🟡 Early-substitution / rotation risk — only the coarse minutes discount; no explicit sub model
+- ⬜ Manual overrides — the intended escape hatch for press-conference/line-up news; hook not built
 
-Allow manual overrides for injuries, press conferences, and tactical changes.
+*Implemented in `src/fpl_alpha/minutes.py` (+ shrinkage in `allocation.py`); tested in `tests/test_minutes.py` and `tests/test_allocation.py`. Priors are league-rough and uncalibrated — a backtest against realized minutes is the next refinement.*
 
 ### 8. Deterministic Expected Points — ⬜ not started
 Build an interpretable FPL xPts calculator using:
@@ -251,7 +258,7 @@ The step 2→4 chain runs today on real cached EPL odds via `scripts/demo_epl_ma
                       │ Clean-sheet prob.✅ │
                       │ Goal probability 🟡 │
                       │ Assist probability🟡│
-                      │ Expected minutes ⬜ │
+                      │ Expected minutes 🟡 │
                       │ Saves / cards    ⬜ │
                       │ DefCon           ⬜ │
                       └─────────┬───────────┘
@@ -280,8 +287,9 @@ The step 2→4 chain runs today on real cached EPL odds via `scripts/demo_epl_ma
                        └─────────────────┘
 
 Built so far: Official FPL API ingestion, the Identity + Data Layer, the
-Team xG / clean-sheet portion of the Probability Engine, and the historical-shares
-player allocator (team xG → per-player goal/assist probability).
+Team xG / clean-sheet portion of the Probability Engine, the historical-shares
+player allocator (team xG → per-player goal/assist probability), and the
+expected-minutes model (fitness gate + shrinkage) feeding that allocation.
 
 ## Repository Structure
 
@@ -290,7 +298,7 @@ each stage starts as a single module and is promoted to a package only when it
 needs more than one file, per the guidance at the bottom of this section. See
 `README.md` / `CLAUDE.md` for the current tree. Notably, the deep `models/*` and
 `markets/*` sub-packages are **not** created yet (steps 5+), and stages exist as
-single modules: `markets.py`, `team_xg.py`, `allocation.py`, `identity.py`.
+single modules: `markets.py`, `team_xg.py`, `allocation.py`, `minutes.py`, `identity.py`.
 
 Proposed target:
 

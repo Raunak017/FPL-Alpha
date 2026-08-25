@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 
-from fpl_alpha.allocation import allocate_fixture, attack_rates_from_bootstrap
+from fpl_alpha.allocation import allocate_fixture, attack_weights_from_bootstrap
 from fpl_alpha.config import RAW
 from fpl_alpha.identity import match_odds_name, teams_from_bootstrap
 from fpl_alpha.ingestion import odds
@@ -55,7 +55,7 @@ def main() -> None:
 
     boot = _load_bootstrap()
     teams = teams_from_bootstrap(boot)
-    rates = attack_rates_from_bootstrap(boot)          # per-player xG/xA weights
+    rates = attack_weights_from_bootstrap(boot)        # shrunk, minutes-weighted xG/xA
     names = {e["id"]: e["web_name"] for e in boot["elements"]}
     fixtures = odds.parse_the_odds_api_events(_load_odds(args.markets, args.regions, args.live))
     print(f"Loaded {len(fixtures)} EPL fixtures "

@@ -36,13 +36,13 @@ fetch them per-run. Position order is GKP / DEF / MID / FWD.
 |------|--------|-------------------|---------|-----------|
 | **P(CS)** | 🟡 ~80% | `team_xg.fit_team_goals` → `p_clean_sheet_home/away` from fitted Poisson λ; tested | Attach team CS prob to that team's players | 4 ✅ (team) |
 | **CS_pts** | 🟡 trivial | `Player.position` known | Write the position→points table | 8 |
-| **xG** (per player) | 🟡 ~70% | `allocation.allocate_fixture` splits team λ by season-xG share; tested | Minutes weighting (step 7); props as an alt source | 5 |
+| **xG** (per player) | 🟡 ~80% | `attack_weights_from_bootstrap` → shrunk per-90 rate × expected minutes, split by `allocate_fixture` | Calibrate priors; props as an alt source | 5 |
 | **g_pts** | 🟡 trivial | position known | constant table | 8 |
-| **xA** (per player) | 🟡 ~70% | `allocation.allocate_fixture` splits `λ × ASSISTED_GOAL_FRACTION` by xA share | same as xG | 6 |
+| **xA** (per player) | 🟡 ~80% | same builder splits `λ × ASSISTED_GOAL_FRACTION` by shrunk xA weight | calibrate priors | 6 |
 | **a_pts** | 🟡 trivial | — | constant | 8 |
 | **E[bonus]** | 🔴 0% | bootstrap has `bps`, `bonus` (season totals) | BPS model — within-match ranking; hardest term | 10 |
 | **E[defcon]** | 🔴 0% | bootstrap has `defensive_contribution`, `clearances_blocks_interceptions`, `tackles`, `recoveries` | Threshold model → P(≥ threshold)·2 | 10 |
-| **P(start)** (gate) | 🟡 ~40% | `allocation.availability_factor` gates the *fitness* half (injuries/suspensions) from `status` + `chance_of_playing_next_round`; wired into allocation | Rotation/minutes model (a fit benchwarmer still gets full weight) | 7 |
+| **P(start)** (gate) | 🟡 ~70% | `minutes.py`: `availability_factor` (fitness) + `expected_minutes` / `start_probability` with EB shrinkage; expected-minutes wired into allocation weights | Calibrate priors vs realized minutes; manual line-up overrides | 7 |
 | **Assembly** (the product) | 🔴 0% | typed contracts (`schemas.py`) ready | No `scoring`/`projections` module ties terms together | 8 |
 
 **Tally:** the team→player bridge and the two attacking terms (`xG`, `xA`) are now
@@ -72,32 +72,43 @@ Two sources, not mutually exclusive:
    wire alongside step 5. Reuse `markets.consensus` (a yes/no pair de-vigs like a
    2-outcome h2h) and `identity.match_odds_name` for names.
 
-### Availability gate (fitness half of `P(start)`) — ✅ built
+### Availability gate + minutes model (`P(start)`) — ✅ built
 
-`allocation.availability_factor(status, chance_of_playing_next_round)` scales each
-player's weight in [0,1] before allocating: injured/suspended → 0, doubtful (75%)
-→ 0.75. A zeroed player drops out and `allocate` renormalizes, so **his share
-flows to the teammates who'll actually play** (verified: an injured striker no
-longer leads his team's threat list). Gates *fitness* only — a fit-but-rotated
-player still gets full weight until the minutes model (step 7). Refresh the
-bootstrap cache near the deadline (`refresh_fpl.py --force`) so injury news is
-current — the gate is only as fresh as the cache.
+`minutes.availability_factor(status, chance_of_playing_next_round)` scales each
+player in [0,1]: injured/suspended → 0, doubtful (75%) → 0.75. A zeroed player
+drops out and `allocate` renormalizes, so **his share flows to the teammates who'll
+actually play** (verified: an injured striker no longer leads his team's threat
+list). On top of that, `expected_minutes` / `start_probability` shrink last-season
+volume toward a prior (empirical-Bayes, evidence-weighted by minutes), so rotation
+lowers a share and thin-history players fall back to a baseline rather than 0.
+Refresh the bootstrap cache near the deadline (`refresh_fpl.py --force`) so injury
+news is current — the gate is only as fresh as the cache.
+
+### Shrinkage (thin-squad fix) — ✅ built
+
+`attack_weights_from_bootstrap` blends each player's per-90 xG/xA *rate* toward a
+**positional prior** (`shrink_rate`, evidence-weighted by minutes) and scales by
+expected minutes. Because `allocate` renormalizes, only *relative* weights matter,
+so a zero-history teammate going from 0 → positional-prior is what breaks the
+one-player monopoly. **Verified:** Ipswich's threat went from `Lukić 0.95xG`
+(74% of the team) to their forwards sharing ~0.13xG each.
 
 ### Sanity check vs FPL `ep_next` (GW1)
 
 `scripts/compare_ep_next.py` computes a *partial* xPts (appearance + attacking +
 clean sheet; **no** bonus/defcon/saves) and lines it up against FPL's own
-`ep_next`. Findings on the cached GW1 slate:
+`ep_next`. After the shrinkage + minutes model:
 
-- **Directionally sound.** Spearman ≈ 0.67 across all players; premium attackers
-  (B.Fernandes, Haaland, Saka, Mbeumo, Gakpo) rank high in both.
-- **Systematic under-count** at every position (GKP −0.9, MID −0.4, FWD −0.5,
-  DEF −0.3) — exactly the missing positive terms (bonus, defcon, and saves for
-  GKs, the biggest gap). Confirms *what* is left to build, not a bug.
-- **Thin-squad artifact.** Allocation over-concentrates in weak/promoted squads:
-  Ipswich carry only 3.0 total last-season xG, 74% of it Lukić's, so he absorbs
-  ~74% of their goals and tops our list at 9.1 partial xPts vs `ep_next` 1.5. A
-  minutes model + shrinkage toward a positional prior is the fix (step 7).
+- **Directionally strong.** Pearson **+0.79** / Spearman **+0.70** across all 592
+  players (was +0.61 / +0.67 before shrinkage — the Lukić outlier had been
+  wrecking Pearson). Our top-20 is now genuinely elite (B.Fernandes, Haaland,
+  Gabriel, Mbeumo, Raya) with tight deltas.
+- **Thin-squad artifact resolved.** Lukić's 9.1-vs-1.5 blowout is gone; the
+  largest remaining over-rate is ~+2 for attacking fullbacks (we credit
+  appearance + CS + a defender's 6-pt goal but not the negative side).
+- **Systematic under-count remains** at every position (GKs largest) — the
+  still-missing positive terms: **saves**, **defcon**, **bonus**. This maps
+  cleanly to what's left to build (steps 8/10), not a bug.
 
 ## What this formula omits vs full FPL scoring
 

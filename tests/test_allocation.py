@@ -8,7 +8,9 @@ from fpl_alpha.allocation import (
     allocate,
     allocate_fixture,
     attack_rates_from_bootstrap,
+    attack_weights_from_bootstrap,
     availability_factor,
+    shrink_rate,
 )
 from fpl_alpha.schemas import PlayerRates, TeamGoalModel
 
@@ -179,3 +181,66 @@ def test_rates_from_bootstrap_honors_alternate_keys():
     )
     assert rates[5].xg == pytest.approx(0.9)
     assert rates[5].xa == pytest.approx(0.3)
+
+
+# --- shrinkage + minutes weighting (step 7) ---------------------------------
+def test_shrink_rate_zero_minutes_returns_prior():
+    assert shrink_rate(5.0, 0.0, 0.08) == pytest.approx(0.08)  # no evidence -> prior
+
+
+def test_shrink_rate_heavy_minutes_returns_own_rate():
+    # 100k minutes of evidence overwhelms the k~500 prior weight.
+    assert shrink_rate(0.30, 100_000, 0.08) == pytest.approx(0.30, abs=2e-3)
+
+
+def test_shrink_rate_blends_between():
+    val = shrink_rate(0.30, 500, 0.08, k=500)  # equal evidence and prior weight
+    assert val == pytest.approx((0.30 + 0.08) / 2)
+
+
+def _thin_squad_bootstrap() -> dict:
+    """One historied midfielder + three zero-history teammates (a 'Lukić' squad)."""
+    def el(i, xg90, mins, etype=3):
+        return {"id": i, "team": 1, "element_type": etype, "status": "a",
+                "chance_of_playing_next_round": None, "minutes": mins,
+                "expected_goals_per_90": xg90, "expected_assists_per_90": 0.0,
+                "expected_goals": str(xg90 * mins / 90), "expected_assists": "0"}
+    return {"elements": [
+        el(1, 0.30, 2500),  # the historied MID
+        el(2, 0.0, 0),      # zero-history teammates
+        el(3, 0.0, 0),
+        el(4, 0.0, 0, etype=4),  # a forward with no history
+        {"id": 9, "team": 2, "element_type": 4, "status": "a",  # opponent, ignored here
+         "chance_of_playing_next_round": None, "minutes": 2000,
+         "expected_goals_per_90": 0.4, "expected_assists_per_90": 0.1,
+         "expected_goals": "8", "expected_assists": "2"},
+    ]}
+
+
+def test_weights_builder_zero_history_player_gets_nonzero_weight():
+    w = attack_weights_from_bootstrap(_thin_squad_bootstrap())
+    assert w[2].xg > 0.0  # pulled to the positional prior, not left at 0
+    assert w[1].available == 1.0  # availability folded into expected minutes
+
+
+def test_weights_builder_injured_player_zeroed():
+    boot = _thin_squad_bootstrap()
+    boot["elements"][0]["status"] = "i"
+    boot["elements"][0]["chance_of_playing_next_round"] = 0
+    w = attack_weights_from_bootstrap(boot)
+    assert w[1].xg == 0.0  # expected minutes -> 0
+
+
+def test_shrinkage_deconcentrates_thin_squad():
+    boot = _thin_squad_bootstrap()
+    model = TeamGoalModel("A_v_B", 1, 2, 2.0, 1.0, 0.4, 0.2)
+
+    raw = {r.fpl_id: r for r in allocate_fixture(model, attack_rates_from_bootstrap(boot))}
+    shrunk = {r.fpl_id: r for r in allocate_fixture(model, attack_weights_from_bootstrap(boot))}
+
+    # Raw season-totals hand the lone historied MID almost the entire team λ...
+    assert raw[1].goal_share > 0.95
+    # ...shrinkage spreads it to fit teammates, cutting his share sharply.
+    assert shrunk[1].goal_share < raw[1].goal_share - 0.3
+    # Every team still sums to its λ (allocation is share-preserving).
+    assert sum(r.exp_goals for r in shrunk.values() if r.team_fpl_id == 1) == pytest.approx(2.0)

@@ -26,11 +26,12 @@ from __future__ import annotations
 
 import json
 
-from fpl_alpha.allocation import allocate_fixture, attack_rates_from_bootstrap
+from fpl_alpha.allocation import allocate_fixture, attack_weights_from_bootstrap
 from fpl_alpha.config import RAW
 from fpl_alpha.identity import match_odds_name, teams_from_bootstrap
 from fpl_alpha.ingestion import odds
 from fpl_alpha.markets import consensus
+from fpl_alpha.minutes import availability_factor, start_probability
 from fpl_alpha.team_xg import fit_team_goals
 
 # --- Minimal FPL scoring constants (partial; lives here, not in the engine) --
@@ -39,7 +40,6 @@ GOAL_PTS = {"GKP": 6, "DEF": 6, "MID": 5, "FWD": 4}
 CS_PTS = {"GKP": 4, "DEF": 4, "MID": 1, "FWD": 0}
 ASSIST_PTS = 3
 APPEARANCE_PTS = 2  # assume a starter plays 60'+
-_STARTS_FOR_NAILED = 30  # last-season starts treated as "nailed" (crude P(start))
 
 
 def _f(v) -> float:
@@ -83,7 +83,7 @@ def _spearman(xs: list[float], ys: list[float]) -> float:
 def main() -> None:
     boot = json.loads((RAW / "fpl" / "bootstrap-static.json").read_text())
     teams = teams_from_bootstrap(boot)
-    rates = attack_rates_from_bootstrap(boot)  # availability-gated
+    rates = attack_weights_from_bootstrap(boot)  # shrunk + minutes-weighted
 
     el = {e["id"]: e for e in boot["elements"]}
     events = json.loads((RAW / "the-odds-api" / "theoddsapi-epl-h2h+totals-uk.json").read_text())
@@ -105,10 +105,11 @@ def main() -> None:
         for r in allocate_fixture(model, rates):
             e = el[r.fpl_id]
             pos = POS.get(e["element_type"], "UNK")
-            # Crude P(start): fitness × last-season start rate (capped). Stand-in
-            # for the real minutes model (step 7); flagged in the header.
-            avail = rates[r.fpl_id].available
-            p_start = avail * min(1.0, _f(e.get("starts")) / _STARTS_FOR_NAILED)
+            # P(start) from the step-7 minutes model (fitness × shrunk start rate).
+            p_start = start_probability(
+                _f(e.get("starts")), _f(e.get("minutes")),
+                availability_factor(e.get("status"), e.get("chance_of_playing_next_round")),
+            )
             xpts = (
                 p_start * APPEARANCE_PTS
                 + r.exp_goals * GOAL_PTS.get(pos, 0)

@@ -33,43 +33,67 @@ FPL's own injury/suspension signals (``status`` + ``chance_of_playing_next_round
 An injured player (factor 0) drops out entirely and — because :func:`allocate`
 renormalizes over the survivors — *his share flows to the teammates who will
 actually play*, rather than vanishing. Doubtful players (e.g. 75%) get a reduced
-share. This is the fitness half of the ``P(start)`` term; it does not yet model
-rotation (a fit-but-benched player still gets full weight — that needs the
-minutes model, Plan step 7).
+share. This is the fitness half of the ``P(start)`` term.
 
-Known baseline limitations (addressed by step 7 + manual overrides)
--------------------------------------------------------------------
-- Pre-season, shares come from *last* season, so new signings / promoted-club
-  players with no history get ~0 share until this season's stats accrue.
-- Availability only captures *fitness*, not *rotation*; a fit squad player who
-  won't start is still over-credited until the minutes model lands.
+Two builders produce the share weights:
+
+- :func:`attack_rates_from_bootstrap` — the simple baseline: raw season-total
+  xG/xA scaled by fitness. Fast, but concentrates in thin/promoted squads and
+  ignores rotation.
+- :func:`attack_weights_from_bootstrap` — the step-7 upgrade: per-90 rates
+  **shrunk toward a positional prior** (so zero-history teammates fall back to a
+  baseline instead of 0) and scaled by **expected minutes** (so rotation lowers a
+  player's share). This is what dissolves the thin-squad concentration artifact.
+
+Remaining limitations (manual overrides are the intended escape hatch)
+----------------------------------------------------------------------
+- Shrinkage priors and the minutes model are league-rough constants, not yet
+  calibrated against realized data (needs a backtest).
+- A genuinely key new signing with no FPL history still gets only the positional
+  prior until stats accrue or an override is supplied.
 """
 from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
 
+from .minutes import FULL_MATCH, availability_factor, expected_minutes
 from .schemas import PlayerFixtureAttack, PlayerRates, TeamGoalModel
+
+__all__ = [
+    "ASSISTED_GOAL_FRACTION",
+    "availability_factor",  # re-exported from .minutes for back-compat
+    "allocate",
+    "allocate_fixture",
+    "attack_rates_from_bootstrap",
+    "attack_weights_from_bootstrap",
+    "shrink_rate",
+]
 
 # Share of goals that earn an FPL assist (~3 in 4 league-wide). Tunable; a
 # per-team xA/xG ratio would be more precise but noisier for thin/promoted sides.
 ASSISTED_GOAL_FRACTION = 0.75
 
-# FPL status codes that mean "not available" when no explicit chance-% is given.
-_UNAVAILABLE_STATUS = frozenset({"i", "s", "u", "n"})  # injured/suspended/unavailable/not-in-squad
+# --- Shrinkage priors (Plan step 7) -----------------------------------------
+# Rough league per-90 attacking baselines by position. A player's own per-90 rate
+# is shrunk toward these, so thin/zero-history players fall back to a sensible
+# positional level instead of 0 (which is what let one historied player dominate
+# a promoted squad). Only *relative* weights matter — allocate() renormalizes to
+# team λ — so these values steer the shape, not the scale. Tunable.
+_POSITION = {1: "GKP", 2: "DEF", 3: "MID", 4: "FWD"}
+POS_XG90_PRIOR = {"GKP": 0.0, "DEF": 0.03, "MID": 0.08, "FWD": 0.22, "UNK": 0.05}
+POS_XA90_PRIOR = {"GKP": 0.0, "DEF": 0.04, "MID": 0.08, "FWD": 0.09, "UNK": 0.05}
+K_RATE = 500.0  # pseudo-minutes of prior weight (~5-6 matches before own rate dominates)
 
 
-def availability_factor(status: str | None, chance_next: float | int | None) -> float:
-    """Fitness weight in [0, 1] from FPL availability signals.
+def shrink_rate(rate90: float, minutes: float, prior90: float, *, k: float = K_RATE) -> float:
+    """Empirical-Bayes shrink a per-90 rate toward ``prior90``, weighted by minutes.
 
-    ``chance_of_playing_next_round`` (0/25/50/75/100) is authoritative when
-    present. Otherwise: injured/suspended/unavailable → 0.0; everything else
-    (available, or an unlabelled doubt) → 1.0. This gates *fitness* only, not
-    rotation — see the module docstring.
+    ``(minutes·rate90 + k·prior90) / (minutes + k)`` — a player with lots of
+    minutes keeps their own rate; one with few (or zero) is pulled to the prior.
     """
-    if chance_next is not None:
-        return max(0.0, min(1.0, float(chance_next) / 100.0))
-    return 0.0 if status in _UNAVAILABLE_STATUS else 1.0
+    denom = minutes + k
+    return (minutes * rate90 + k * prior90) / denom if denom > 0 else prior90
 
 
 def allocate(team_total: float, weights: Mapping[int, float]) -> dict[int, float]:
@@ -171,3 +195,46 @@ def attack_rates_from_bootstrap(
         )
         for e in bootstrap["elements"]
     }
+
+
+def attack_weights_from_bootstrap(
+    bootstrap: dict[str, Any],
+    *,
+    gate_availability: bool = True,
+) -> dict[int, PlayerRates]:
+    """Per-match attacking weights with minutes + shrinkage (Plan steps 5-7).
+
+    The upgrade over :func:`attack_rates_from_bootstrap` (which uses raw season
+    totals): each player's weight is a **per-match expected contribution**
+
+        weight = shrink_rate(xg_per_90 → positional prior) · expected_minutes / 90
+
+    which fixes two things at once:
+
+    - **Thin-squad concentration.** A zero-history teammate no longer weighs 0 —
+      :func:`shrink_rate` pulls them to a positional baseline — so one historied
+      player can't absorb the whole team λ (the "Lukić" artifact).
+    - **Rotation.** Expected minutes scale the weight, so a fit-but-rotated player
+      contributes less than a nailed starter of the same rate.
+
+    Availability is folded into ``expected_minutes``, so the returned
+    ``PlayerRates.available`` is 1.0 (already applied). The result plugs straight
+    into :func:`allocate_fixture`.
+    """
+    out: dict[int, PlayerRates] = {}
+    for e in bootstrap["elements"]:
+        pos = _POSITION.get(e.get("element_type"), "UNK")
+        mins = _to_float(e.get("minutes"))
+        avail = (
+            availability_factor(e.get("status"), e.get("chance_of_playing_next_round"))
+            if gate_availability
+            else 1.0
+        )
+        emin = expected_minutes(mins, avail)
+        play_frac = emin / FULL_MATCH
+        wx = shrink_rate(_to_float(e.get("expected_goals_per_90")), mins, POS_XG90_PRIOR[pos]) * play_frac
+        wa = shrink_rate(_to_float(e.get("expected_assists_per_90")), mins, POS_XA90_PRIOR[pos]) * play_frac
+        out[e["id"]] = PlayerRates(
+            fpl_id=e["id"], team_fpl_id=e["team"], xg=wx, xa=wa, available=1.0
+        )
+    return out
