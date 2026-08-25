@@ -12,7 +12,18 @@ from typing import Iterable
 import duckdb
 
 from .config import DATA
-from .schemas import Fixture, Player, PlayerGameweekHistory, PlayerSnapshot, Team
+from .schemas import (
+    Fixture,
+    OddsBookmaker,
+    OddsEventFixtureMapping,
+    OddsOutcomeSnapshot,
+    OddsPlayerMapping,
+    OddsProviderEvent,
+    Player,
+    PlayerGameweekHistory,
+    PlayerSnapshot,
+    Team,
+)
 
 DATABASE_PATH = DATA / "fpl_alpha.duckdb"
 
@@ -148,6 +159,63 @@ def initialize_schema(connection: duckdb.DuckDBPyConnection) -> None:
 
         CREATE TABLE IF NOT EXISTS gameweek_history_ingestions (
             gameweek INTEGER PRIMARY KEY
+        );
+
+        CREATE TABLE IF NOT EXISTS odds_provider_events (
+            provider_key VARCHAR NOT NULL,
+            provider_event_id VARCHAR NOT NULL,
+            sport_key VARCHAR NOT NULL,
+            home_team VARCHAR NOT NULL,
+            away_team VARCHAR NOT NULL,
+            commence_time TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (provider_key, provider_event_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS odds_event_fixture_mappings (
+            provider_key VARCHAR NOT NULL,
+            provider_event_id VARCHAR NOT NULL,
+            fpl_fixture_id BIGINT,
+            match_method VARCHAR NOT NULL,
+            PRIMARY KEY (provider_key, provider_event_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS odds_bookmakers (
+            provider_key VARCHAR NOT NULL,
+            bookmaker_key VARCHAR NOT NULL,
+            title VARCHAR NOT NULL,
+            PRIMARY KEY (provider_key, bookmaker_key)
+        );
+
+        CREATE TABLE IF NOT EXISTS odds_player_mappings (
+            provider_key VARCHAR NOT NULL,
+            provider_event_id VARCHAR NOT NULL,
+            selection_description VARCHAR NOT NULL,
+            fpl_player_id BIGINT,
+            match_method VARCHAR NOT NULL,
+            PRIMARY KEY (provider_key, provider_event_id, selection_description)
+        );
+
+        CREATE TABLE IF NOT EXISTS odds_outcome_snapshots (
+            provider_key VARCHAR NOT NULL,
+            provider_event_id VARCHAR NOT NULL,
+            bookmaker_key VARCHAR NOT NULL,
+            market_key VARCHAR NOT NULL,
+            market_ordinal INTEGER NOT NULL,
+            market_description VARCHAR,
+            market_team VARCHAR,
+            outcome_ordinal INTEGER NOT NULL,
+            selection_description VARCHAR,
+            fpl_player_id BIGINT,
+            outcome_name VARCHAR NOT NULL,
+            american_price INTEGER NOT NULL,
+            point DOUBLE,
+            last_update TIMESTAMPTZ,
+            last_change_at TIMESTAMPTZ,
+            captured_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (
+                provider_key, provider_event_id, bookmaker_key, market_key,
+                market_ordinal, outcome_ordinal, captured_at
+            )
         );
 
         ALTER TABLE player_snapshots ADD COLUMN IF NOT EXISTS total_points INTEGER;
@@ -518,3 +586,238 @@ def mark_gameweek_history_ingested(
         "ON CONFLICT (gameweek) DO NOTHING",
         [gameweek],
     )
+
+
+def load_teams(connection: duckdb.DuckDBPyConnection) -> list[Team]:
+    """Load canonical teams for provider-event fixture matching."""
+    return [
+        Team(fpl_id, name, short_name, tuple(aliases))
+        for fpl_id, name, short_name, aliases in connection.execute(
+            "SELECT fpl_id, name, short_name, aliases FROM teams ORDER BY fpl_id"
+        ).fetchall()
+    ]
+
+
+def load_fixtures(connection: duckdb.DuckDBPyConnection) -> list[Fixture]:
+    """Load FPL fixtures for provider-event fixture matching."""
+    rows = connection.execute(
+        """
+        SELECT fpl_id, code, event, CAST(kickoff_time AS VARCHAR), finished, finished_provisional,
+               minutes, provisional_start_time, started, team_a_fpl_id, team_a_score,
+               team_a_difficulty, team_h_fpl_id, team_h_score, team_h_difficulty
+        FROM fixtures
+        ORDER BY fpl_id
+        """
+    ).fetchall()
+    return [
+        Fixture(
+            fpl_id=fpl_id,
+            code=code,
+            event=event,
+            kickoff_time=_timestamp_as_iso(kickoff_time),
+            finished=finished,
+            finished_provisional=finished_provisional,
+            minutes=minutes,
+            provisional_start_time=provisional_start_time,
+            started=started,
+            team_a_fpl_id=team_a_fpl_id,
+            team_a_score=team_a_score,
+            team_a_difficulty=team_a_difficulty,
+            team_h_fpl_id=team_h_fpl_id,
+            team_h_score=team_h_score,
+            team_h_difficulty=team_h_difficulty,
+        )
+        for (
+            fpl_id,
+            code,
+            event,
+            kickoff_time,
+            finished,
+            finished_provisional,
+            minutes,
+            provisional_start_time,
+            started,
+            team_a_fpl_id,
+            team_a_score,
+            team_a_difficulty,
+            team_h_fpl_id,
+            team_h_score,
+            team_h_difficulty,
+        ) in rows
+    ]
+
+
+def load_players(connection: duckdb.DuckDBPyConnection) -> list[Player]:
+    """Load FPL player identity for constrained provider-prop matching."""
+    return [
+        Player(fpl_id, web_name, full_name, team_fpl_id, position, 0, tuple(aliases))
+        for fpl_id, web_name, full_name, team_fpl_id, position, aliases in connection.execute(
+            """
+            SELECT fpl_id, web_name, full_name, team_fpl_id, position, aliases
+            FROM players
+            ORDER BY fpl_id
+            """
+        ).fetchall()
+    ]
+
+
+def upsert_odds_provider_events(
+    connection: duckdb.DuckDBPyConnection, events: Iterable[OddsProviderEvent]
+) -> None:
+    """Upsert provider event identity independently of its FPL mapping."""
+    rows = [
+        (
+            event.provider_key,
+            event.provider_event_id,
+            event.sport_key,
+            event.home_team,
+            event.away_team,
+            event.commence_time,
+        )
+        for event in events
+    ]
+    if rows:
+        connection.executemany(
+            """
+            INSERT INTO odds_provider_events (
+                provider_key, provider_event_id, sport_key, home_team, away_team, commence_time
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (provider_key, provider_event_id) DO UPDATE SET
+                sport_key = excluded.sport_key,
+                home_team = excluded.home_team,
+                away_team = excluded.away_team,
+                commence_time = excluded.commence_time
+            """,
+            rows,
+        )
+
+
+def upsert_odds_event_fixture_mappings(
+    connection: duckdb.DuckDBPyConnection, mappings: Iterable[OddsEventFixtureMapping]
+) -> None:
+    """Upsert the current provider-event to FPL-fixture mapping."""
+    rows = [
+        (
+            mapping.provider_key,
+            mapping.provider_event_id,
+            mapping.fpl_fixture_id,
+            mapping.match_method,
+        )
+        for mapping in mappings
+    ]
+    if rows:
+        connection.executemany(
+            """
+            INSERT INTO odds_event_fixture_mappings (
+                provider_key, provider_event_id, fpl_fixture_id, match_method
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT (provider_key, provider_event_id) DO UPDATE SET
+                fpl_fixture_id = excluded.fpl_fixture_id,
+                match_method = excluded.match_method
+            """,
+            rows,
+        )
+
+
+def upsert_odds_bookmakers(
+    connection: duckdb.DuckDBPyConnection, bookmakers: Iterable[OddsBookmaker]
+) -> None:
+    """Upsert bookmaker identity for an odds provider."""
+    rows = [
+        (bookmaker.provider_key, bookmaker.bookmaker_key, bookmaker.title)
+        for bookmaker in bookmakers
+    ]
+    if rows:
+        connection.executemany(
+            """
+            INSERT INTO odds_bookmakers (provider_key, bookmaker_key, title)
+            VALUES (?, ?, ?)
+            ON CONFLICT (provider_key, bookmaker_key) DO UPDATE SET
+                title = excluded.title
+            """,
+            rows,
+        )
+
+
+def upsert_odds_player_mappings(
+    connection: duckdb.DuckDBPyConnection, mappings: Iterable[OddsPlayerMapping]
+) -> None:
+    """Persist auditable player-prop mappings, including unresolved names."""
+    rows = [
+        (
+            mapping.provider_key,
+            mapping.provider_event_id,
+            mapping.selection_description,
+            mapping.fpl_player_id,
+            mapping.match_method,
+        )
+        for mapping in mappings
+    ]
+    if rows:
+        connection.executemany(
+            """
+            INSERT INTO odds_player_mappings (
+                provider_key, provider_event_id, selection_description,
+                fpl_player_id, match_method
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (provider_key, provider_event_id, selection_description) DO UPDATE SET
+                fpl_player_id = excluded.fpl_player_id,
+                match_method = excluded.match_method
+            """,
+            rows,
+        )
+
+
+def insert_odds_outcome_snapshots(
+    connection: duckdb.DuckDBPyConnection, snapshots: Iterable[OddsOutcomeSnapshot]
+) -> None:
+    """Append timestamped bookmaker outcomes without replacing past prices."""
+    rows = [
+        (
+            snapshot.provider_key,
+            snapshot.provider_event_id,
+            snapshot.bookmaker_key,
+            snapshot.market_key,
+            snapshot.market_ordinal,
+            snapshot.market_description,
+            snapshot.market_team,
+            snapshot.outcome_ordinal,
+            snapshot.selection_description,
+            snapshot.fpl_player_id,
+            snapshot.outcome_name,
+            snapshot.american_price,
+            snapshot.point,
+            snapshot.last_update,
+            snapshot.last_change_at,
+            snapshot.captured_at,
+        )
+        for snapshot in snapshots
+    ]
+    if rows:
+        connection.executemany(
+            """
+            INSERT INTO odds_outcome_snapshots (
+                provider_key, provider_event_id, bookmaker_key, market_key, market_ordinal,
+                market_description, market_team, outcome_ordinal, selection_description,
+                fpl_player_id, outcome_name, american_price, point, last_update,
+                last_change_at, captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT DO UPDATE SET
+                fpl_player_id = COALESCE(
+                    excluded.fpl_player_id, odds_outcome_snapshots.fpl_player_id
+                )
+            """,
+            rows,
+        )
+
+
+def _timestamp_as_iso(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if value.endswith("+00:00"):
+            return value.removesuffix("+00:00") + "Z"
+        if value.endswith("+00"):
+            return value.removesuffix("+00") + "Z"
+        return value
+    return value.isoformat().replace("+00:00", "Z")

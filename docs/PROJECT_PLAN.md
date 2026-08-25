@@ -4,18 +4,18 @@
 
 Build a market-informed FPL projection and optimization engine that combines official FPL data, football statistics, betting markets, expected minutes, and simulation to estimate player expected points and recommend squad decisions.
 
-## Status (as of 2026-08-23)
+## Status (as of 2026-08-25)
 
-Steps **1–4** (the initial focus) are code-complete and unit-tested end-to-end
-**offline**; the one external gap is a live, EPL-capable odds key. Player-level
-work (steps 5+) has not started.
+Steps **1, 2, and 4** are code-complete; Step 3 has its core methods but still
+needs outlier handling and bookmaker weighting. PropLine live capture has been
+validated on EPL events. Player-level work (steps 5+) has not started.
 
 **Legend:** ✅ done · 🟡 partial (see `[remaining: …]` in the heading) · ⬜ not started
 
 | Step | Status |
 |------|--------|
 | 1. FPL Data Ingestion | ✅ done |
-| 2. Betting Odds Ingestion | 🟡 partial |
+| 2. Betting Odds Ingestion | ✅ done |
 | 3. No-Vig Market Probabilities | 🟡 partial |
 | 4. Market-Implied Team xG | ✅ done |
 | 5–12 (player projections → optimizer) | ⬜ not started |
@@ -78,21 +78,24 @@ connection.close()
 PY
 ```
 
-### 2. Betting Odds Ingestion — 🟡 partial [remaining: EPL-capable API key; BTTS + player props / shots / saves / cards markets]
+### 2. Betting Odds Ingestion — ✅ done
 Integrate an odds provider and collect:
 
-- ✅ Match odds (h2h) — client wired
-- ✅ Goal totals — client wired
-- ⬜ BTTS
-- ⬜ Player goal props
-- ⬜ Assist props
-- ⬜ Shots
-- ⬜ Saves
-- ⬜ Cards
+- ✅ Match odds (h2h)
+- ✅ Goal totals
+- ✅ Both teams to score
+- ✅ Anytime goalscorer props
+- ✅ Player assist props
 
-✅ Store raw timestamped odds snapshots — `snapshots.py` (deterministic naming + `manifest.jsonl`).
+✅ Raw PropLine event responses remain cache-first under `data/raw/propline/`.
 
-*Clients in `src/fpl_alpha/ingestion/odds.py` (SportsGameOdds + The Odds API), throttled via `cache.py`; captured on a schedule by `scripts/snapshot_odds.py`. **Blocked live:** SGO EPL is paywalled on the free tier and `ODDS_API_KEY` is unset, so only cached/example data flows today.*
+✅ Normalized DuckDB persistence for provider events, FPL fixture mappings,
+bookmakers, append-only outcome snapshots, and auditable player mappings.
+
+*PropLine is implemented in `src/fpl_alpha/ingestion/odds.py` and captured
+cache-first with `scripts/refresh_propline_odds.py`. Events map to FPL fixtures
+by home team, away team, and kickoff; player props are fixture-team-scoped and
+use explicit aliases or strict normalization, leaving unresolved labels `NULL`.*
 
 ### 3. No-Vig Market Probabilities — 🟡 partial [remaining: outlier handling + book weighting]
 Convert bookmaker odds into fair probabilities by:
@@ -207,11 +210,11 @@ Later extend this to:
 Start with Steps **1–4**:
 
 1. ✅ FPL data
-2. 🟡 Betting data (infrastructure done; blocked on an EPL-capable odds key)
+2. ✅ Betting data (PropLine live ingestion and DuckDB persistence)
 3. 🟡 Fair market probabilities (core done; outlier handling remaining)
 4. ✅ Market-implied team xG
 
-The step 3→4 chain runs today via `scripts/demo_market_to_xg.py` (offline example odds). Once a live odds feed is wired, `snapshot_odds.py → markets.consensus → team_xg.fit_team_goals` runs on real fixtures with no code changes. Then move into player-level projections.
+The step 3→4 chain runs today via `scripts/demo_market_to_xg.py` (offline example odds). PropLine now supplies live cached and persisted odds; connecting those DuckDB snapshots to the consensus and team-xG stages is separate follow-on work. Then move into player-level projections.
 
 ## High-Level Architecture
 
@@ -222,7 +225,7 @@ The step 3→4 chain runs today via `scripts/demo_market_to_xg.py` (offline exam
                                  │
 ┌─────────────────┐      ┌──────▼──────┐      ┌──────────────────┐
 │ Football Stats  │─────▶│ Identity +  │◀─────│ Betting Markets  │
-│                 │      │ Data Layer   │      │ 🟡 clients ready │
+│                 │      │ Data Layer   │      │ ✅ PropLine ingested │
 └─────────────────┘      └──────┬──────┘      └──────────────────┘
                           ✅ built
                                  │

@@ -156,6 +156,61 @@ class Fixture:
     team_h_difficulty: int
 
 
+# --- Stage 2: provider odds -------------------------------------------------
+@dataclass(frozen=True)
+class OddsProviderEvent:
+    provider_key: str
+    provider_event_id: str
+    sport_key: str
+    home_team: str
+    away_team: str
+    commence_time: str
+
+
+@dataclass(frozen=True)
+class OddsEventFixtureMapping:
+    provider_key: str
+    provider_event_id: str
+    fpl_fixture_id: int | None
+    match_method: str
+
+
+@dataclass(frozen=True)
+class OddsPlayerMapping:
+    provider_key: str
+    provider_event_id: str
+    selection_description: str
+    fpl_player_id: int | None
+    match_method: str
+
+
+@dataclass(frozen=True)
+class OddsBookmaker:
+    provider_key: str
+    bookmaker_key: str
+    title: str
+
+
+@dataclass(frozen=True)
+class OddsOutcomeSnapshot:
+    provider_key: str
+    provider_event_id: str
+    bookmaker_key: str
+    market_key: str
+    market_ordinal: int
+    market_description: str | None
+    market_team: str | None
+    outcome_ordinal: int
+    selection_description: str | None
+    fpl_player_id: int | None
+    outcome_name: str
+    american_price: int
+    point: float | None
+    last_update: str | None
+    last_change_at: str | None
+    captured_at: datetime
+
+
 # --- Stage 3: no-vig market probabilities -----------------------------------
 @dataclass(frozen=True)
 class MarketProb:

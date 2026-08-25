@@ -1,5 +1,10 @@
 """Tests for the identity layer: normalization + odds-name matching."""
-from fpl_alpha.identity import match_odds_name, players_from_bootstrap, teams_from_bootstrap
+from fpl_alpha.identity import (
+    match_odds_name,
+    match_odds_name_strict,
+    players_from_bootstrap,
+    teams_from_bootstrap,
+)
 from fpl_alpha.schemas import Player, Team
 
 # Minimal bootstrap-static fixture (only the fields the normalizers touch).
@@ -73,3 +78,29 @@ def test_returns_none_below_threshold():
 def test_player_object_accepted_directly():
     p = Player(1, "Salah", "Mohamed Salah", 14, "MID", 130)
     assert match_odds_name("Mohamed Salah", [p]) is p
+
+
+def test_strict_match_normalizes_provider_team_codes_and_diacritics():
+    player = Player(1, "Aït-Nouri", "Rayan Aït-Nouri", 15, "DEF", 50)
+    apostrophe_player = Player(2, "O'Reilly", "Nico O'Reilly", 15, "MID", 50)
+
+    assert match_odds_name_strict("  RAYAN AIT NOURI (mci) ", [player]) == (
+        player,
+        "normalized_exact",
+    )
+    assert match_odds_name_strict("nico o reilly (MCI)", [apostrophe_player]) == (
+        apostrophe_player,
+        "normalized_exact",
+    )
+
+
+def test_strict_match_allows_only_a_unique_last_name_fallback():
+    player = Player(1, "Tsimikas", "Kostas Tsimikas", 14, "DEF", 45)
+    duplicate = Player(2, "Smith", "John Smith", 14, "MID", 50)
+    other_duplicate = Player(3, "Smith", "Bob Smith", 14, "MID", 50)
+
+    assert match_odds_name_strict("Konstantinos Tsimikas (LIV)", [player]) == (
+        player,
+        "unique_last_name",
+    )
+    assert match_odds_name_strict("James Smith", [duplicate, other_duplicate]) is None
