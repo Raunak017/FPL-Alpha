@@ -27,6 +27,7 @@ _TEAM_ALIASES = {
     "brighton": ("Brighton and Hove Albion",),
     "man city": ("Manchester City",),
     "man utd": ("Manchester United", "Man United"),
+    "leeds": ("Leeds United",),
     "newcastle": ("Newcastle United",),
     "nott m forest": ("Nottingham Forest",),
     "spurs": ("Tottenham", "Tottenham Hotspur"),

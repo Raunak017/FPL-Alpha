@@ -12,6 +12,7 @@ _BOOTSTRAP = {
     "teams": [
         {"id": 1, "name": "Arsenal", "short_name": "ARS"},
         {"id": 13, "name": "Manchester City", "short_name": "MCI"},
+        {"id": 14, "name": "Leeds", "short_name": "LEE"},
     ],
     "elements": [
         {
@@ -46,7 +47,13 @@ def test_players_from_bootstrap_normalizes_fields():
 
 def test_teams_from_bootstrap():
     teams = teams_from_bootstrap(_BOOTSTRAP)
-    assert {t.short_name for t in teams} == {"ARS", "MCI"}
+    assert {t.short_name for t in teams} == {"ARS", "MCI", "LEE"}
+
+
+def test_leeds_united_alias_matches_the_fpl_leeds_team():
+    teams = teams_from_bootstrap(_BOOTSTRAP)
+    leeds = next(team for team in teams if team.short_name == "LEE")
+    assert match_odds_name_strict("Leeds United", teams) == (leeds, "normalized_exact")
 
 
 def test_exact_match():
