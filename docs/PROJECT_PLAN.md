@@ -166,7 +166,7 @@ Estimate:
 
 *Implemented in `src/fpl_alpha/minutes.py` (+ shrinkage in `allocation.py`); tested in `tests/test_minutes.py` and `tests/test_allocation.py`. Priors are league-rough and uncalibrated — a backtest against realized minutes is the next refinement.*
 
-### 8. Deterministic Expected Points — ⬜ not started
+### 8. Deterministic Expected Points — 🟡 partial [remaining: xPts assembler]
 Build an interpretable FPL xPts calculator using:
 
 - Appearance
@@ -179,6 +179,11 @@ Build an interpretable FPL xPts calculator using:
 - Bonus
 
 This becomes the baseline model.
+
+✅ `scoring.py` now contains versioned (`2026-27`) official FPL scoring rules and
+an event-level fixture scorer with component breakdowns. The expected-points
+assembler that supplies probabilities/expectations for those components remains
+to be built.
 
 ### 9. Monte Carlo Match Simulator — ⬜ not started
 Simulate each match thousands of times and apply actual FPL scoring rules.

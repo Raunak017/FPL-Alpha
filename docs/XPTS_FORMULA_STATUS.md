@@ -5,7 +5,7 @@ stages (1–12); this one drills into the **player expected-points formula** we'
 actually trying to compute, maps each term to code that exists today, and names
 the single structural gap that blocks the rest.
 
-*Status as of 2026-08-23. Legend: ✅ done · 🟡 partial · ⬜ not started.*
+*Status as of 2026-09-10. Legend: ✅ done · 🟡 partial · ⬜ not started.*
 
 ## The target formula
 
@@ -18,12 +18,13 @@ why season-average stats alone don't finish the job.
 
 ## FPL scoring reference (the point constants)
 
-These are stable game rules; hardcode them (a `scoring.py` constants block), don't
-fetch them per-run. Position order is GKP / DEF / MID / FWD.
+These are versioned game rules in `scoring.py`; do not fetch them per-run.
+Position order is GKP / DEF / MID / FWD. The deterministic module scores realised
+events with the `2026-27` ruleset; the xPts assembler will reuse these constants.
 
 | Event | GKP | DEF | MID | FWD | Notes |
 |-------|-----|-----|-----|-----|-------|
-| Goal (`g_pts`) | 6 | 6 | 5 | 4 | |
+| Goal (`g_pts`) | 10 | 6 | 5 | 4 | |
 | Assist (`a_pts`) | 3 | 3 | 3 | 3 | position-independent |
 | Clean sheet (`CS_pts`) | 4 | 4 | 1 | 0 | requires 60+ mins played |
 | Defensive contribution (`defcon`) | — | 2 | 2 | 2 | DEF: ≥10 CBIT · MID/FWD: ≥12 (CBIT + recoveries); max 2/match |
@@ -35,11 +36,11 @@ fetch them per-run. Position order is GKP / DEF / MID / FWD.
 | Term | Status | What exists today | The gap | Plan step |
 |------|--------|-------------------|---------|-----------|
 | **P(CS)** | 🟡 ~80% | `team_xg.fit_team_goals` → `p_clean_sheet_home/away` from fitted Poisson λ; tested | Attach team CS prob to that team's players | 4 ✅ (team) |
-| **CS_pts** | 🟡 trivial | `Player.position` known | Write the position→points table | 8 |
+| **CS_pts** | ✅ done | `scoring.py` versioned ruleset | Attach team CS probability to players | 8 |
 | **xG** (per player) | 🟡 ~80% | `attack_weights_from_bootstrap` → shrunk per-90 rate × expected minutes, split by `allocate_fixture` | Calibrate priors; props as an alt source | 5 |
-| **g_pts** | 🟡 trivial | position known | constant table | 8 |
+| **g_pts** | ✅ done | `scoring.py` versioned ruleset | None | 8 |
 | **xA** (per player) | 🟡 ~80% | same builder splits `λ × ASSISTED_GOAL_FRACTION` by shrunk xA weight | calibrate priors | 6 |
-| **a_pts** | 🟡 trivial | — | constant | 8 |
+| **a_pts** | ✅ done | `scoring.py` versioned ruleset | None | 8 |
 | **E[bonus]** | 🔴 0% | bootstrap has `bps`, `bonus` (season totals) | BPS model — within-match ranking; hardest term | 10 |
 | **E[defcon]** | 🔴 0% | bootstrap has `defensive_contribution`, `clearances_blocks_interceptions`, `tackles`, `recoveries` | Threshold model → P(≥ threshold)·2 | 10 |
 | **P(start)** (gate) | 🟡 ~70% | `minutes.py`: `availability_factor` (fitness) + `expected_minutes` / `start_probability` with EB shrinkage; expected-minutes wired into allocation weights | Calibrate priors vs realized minutes; manual line-up overrides | 7 |
@@ -179,6 +180,22 @@ later trust our own team model, the market stays the benchmark to validate it
 against (that's what `snapshots.py` backtests are for).
 
 ## Build sequence (next commits)
+
+### Projection persistence policy
+
+Every projection run is immutable and append-only. `projection_runs` records the
+target gameweek, model name/version, scoring-rules version, input fingerprint,
+and explicit `as_of` / creation timestamps; `player_fixture_projections` stores the player-level,
+per-fixture result and scoring components. A matching input fingerprint is an
+idempotent retry, not a duplicate run. Changed model code/configuration or source
+data requires a new fingerprint and creates a new historical run.
+
+`gameweek_projection_selections` is the sole mutable layer: it points to the
+run chosen as the official decision forecast for a gameweek, normally the final
+successful run before the FPL deadline. This retains all prior forecasts for
+calibration while giving applications one clear current answer. Double
+gameweeks remain one row per player per fixture and are summed by the
+`selected_player_gameweek_projections` view.
 
 1. ✅ **`allocation.py`** — historical-shares team→player split of λ and assists,
    from bootstrap season xG/xA. **Unlocks `xG` and `xA`.** *(steps 5–6)*

@@ -109,6 +109,10 @@ pytest                                 # runs the no-vig math tests
 `refresh_fpl.py` does nothing over the wire if the cache is still fresh; pass
 `--force` to bypass the TTL. Run odds snapshots on a schedule, never in a loop.
 
+**Whenever a new script is added to `scripts/`, update the Scripts table in
+[`README.md`](README.md)** (and its Quickstart if the script belongs there)
+in the same change — don't let the docs drift from what's actually runnable.
+
 ## Conventions
 
 - **Cache-first.** Every external call goes through `cache.fetch`; dev work reads

@@ -238,3 +238,57 @@ class PlayerFixtureAttack:
     exp_assists: float
     goal_share: float = 0.0
     assist_share: float = 0.0
+
+
+# --- Step 8: persisted projection records -----------------------------------
+@dataclass(frozen=True)
+class ProjectionRun:
+    """One immutable execution of a projection model for a target gameweek.
+
+    ``input_fingerprint`` identifies the complete model-and-input state.  A
+    repeated execution with the same fingerprint is a no-op; changed inputs or
+    model code/configuration create a new run so forecasts remain backtestable.
+    Timestamps are supplied by the caller to keep runs reproducible.
+    """
+
+    run_id: str
+    gameweek: int
+    model_name: str
+    model_version: str
+    scoring_rules_version: str
+    input_fingerprint: str
+    as_of: datetime
+    created_at: datetime
+    is_partial: bool = False
+    notes: str | None = None
+
+
+@dataclass(frozen=True)
+class PlayerFixtureProjection:
+    """One player's forecast for one FPL fixture in a projection run.
+
+    Component fields are nullable because the initial partial xPts model does
+    not yet estimate every FPL scoring component.  ``expected_points`` is the
+    total for this fixture, not a gameweek aggregate; doubles are represented by
+    two records and summed by the gameweek view.
+    """
+
+    run_id: str
+    gameweek: int
+    player_fpl_id: int
+    fixture_fpl_id: int
+    expected_points: float
+    expected_goals: float | None = None
+    expected_assists: float | None = None
+    p_start: float | None = None
+    p_60_plus: float | None = None
+    p_clean_sheet: float | None = None
+    appearance_points: float | None = None
+    goal_points: float | None = None
+    assist_points: float | None = None
+    clean_sheet_points: float | None = None
+    save_points: float | None = None
+    defensive_contribution_points: float | None = None
+    bonus_points: float | None = None
+    goals_conceded_points: float | None = None
+    card_points: float | None = None

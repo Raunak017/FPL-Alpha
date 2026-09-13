@@ -6,13 +6,22 @@ snapshots are reproducible.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
 import duckdb
 
 from .config import DATA
-from .schemas import Fixture, Player, PlayerGameweekHistory, PlayerSnapshot, Team
+from .schemas import (
+    Fixture,
+    Player,
+    PlayerFixtureProjection,
+    PlayerGameweekHistory,
+    PlayerSnapshot,
+    ProjectionRun,
+    Team,
+)
 
 DATABASE_PATH = DATA / "fpl_alpha.duckdb"
 
@@ -150,7 +159,54 @@ def initialize_schema(connection: duckdb.DuckDBPyConnection) -> None:
             gameweek INTEGER PRIMARY KEY
         );
 
+        -- Projection runs are immutable.  Never overwrite a prior forecast:
+        -- historical forecasts are required for honest calibration/backtests.
+        CREATE TABLE IF NOT EXISTS projection_runs (
+            run_id UUID PRIMARY KEY,
+            gameweek INTEGER NOT NULL,
+            model_name VARCHAR NOT NULL,
+            model_version VARCHAR NOT NULL,
+            scoring_rules_version VARCHAR NOT NULL,
+            input_fingerprint VARCHAR NOT NULL UNIQUE,
+            as_of TIMESTAMPTZ NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL,
+            is_partial BOOLEAN NOT NULL,
+            notes VARCHAR
+        );
+
+        CREATE TABLE IF NOT EXISTS player_fixture_projections (
+            run_id UUID NOT NULL,
+            gameweek INTEGER NOT NULL,
+            player_fpl_id BIGINT NOT NULL,
+            fixture_fpl_id BIGINT NOT NULL,
+            expected_points DOUBLE NOT NULL,
+            expected_goals DOUBLE,
+            expected_assists DOUBLE,
+            p_start DOUBLE,
+            p_60_plus DOUBLE,
+            p_clean_sheet DOUBLE,
+            appearance_points DOUBLE,
+            goal_points DOUBLE,
+            assist_points DOUBLE,
+            clean_sheet_points DOUBLE,
+            save_points DOUBLE,
+            defensive_contribution_points DOUBLE,
+            bonus_points DOUBLE,
+            goals_conceded_points DOUBLE,
+            card_points DOUBLE,
+            PRIMARY KEY (run_id, player_fpl_id, fixture_fpl_id)
+        );
+
+        -- The selection is mutable; the forecast rows it points to are not.
+        CREATE TABLE IF NOT EXISTS gameweek_projection_selections (
+            gameweek INTEGER PRIMARY KEY,
+            run_id UUID NOT NULL,
+            selected_at TIMESTAMPTZ NOT NULL,
+            selection_reason VARCHAR NOT NULL
+        );
+
         ALTER TABLE player_snapshots ADD COLUMN IF NOT EXISTS total_points INTEGER;
+        ALTER TABLE projection_runs ADD COLUMN IF NOT EXISTS scoring_rules_version VARCHAR;
         ALTER TABLE player_snapshots ADD COLUMN IF NOT EXISTS points_per_game DOUBLE;
         ALTER TABLE player_snapshots ADD COLUMN IF NOT EXISTS form DOUBLE;
         ALTER TABLE player_snapshots ADD COLUMN IF NOT EXISTS minutes INTEGER;
@@ -193,6 +249,17 @@ def initialize_schema(connection: duckdb.DuckDBPyConnection) -> None:
             CASE WHEN now_cost > 0 THEN total_points / (now_cost / 10.0) END AS points_per_million,
             CASE WHEN minutes > 0 THEN total_points * 90.0 / minutes END AS points_per_90
         FROM player_snapshots;
+
+        CREATE OR REPLACE VIEW selected_player_gameweek_projections AS
+        SELECT
+            selection.gameweek,
+            projection.player_fpl_id,
+            selection.run_id,
+            SUM(projection.expected_points) AS expected_points
+        FROM gameweek_projection_selections AS selection
+        JOIN player_fixture_projections AS projection
+            ON projection.run_id = selection.run_id
+        GROUP BY selection.gameweek, projection.player_fpl_id, selection.run_id;
         """
     )
 
@@ -517,4 +584,124 @@ def mark_gameweek_history_ingested(
         "INSERT INTO gameweek_history_ingestions (gameweek) VALUES (?) "
         "ON CONFLICT (gameweek) DO NOTHING",
         [gameweek],
+    )
+
+
+def persist_projection_run(
+    connection: duckdb.DuckDBPyConnection,
+    run: ProjectionRun,
+    projections: Iterable[PlayerFixtureProjection],
+) -> str:
+    """Persist an immutable run and return its id.
+
+    A matching ``input_fingerprint`` identifies an identical model-and-input
+    state, so retrying a run returns its existing id without writing duplicate
+    forecasts.  Callers must generate a different fingerprint whenever any
+    source snapshot, model configuration, or model code changes.
+    """
+    rows = list(projections)
+    if not rows:
+        raise ValueError("a projection run must contain at least one player fixture projection")
+    if any(row.run_id != run.run_id for row in rows):
+        raise ValueError("every projection row must belong to the supplied run")
+    if any(row.gameweek != run.gameweek for row in rows):
+        raise ValueError("every projection row must belong to the supplied gameweek")
+
+    existing = connection.execute(
+        "SELECT run_id FROM projection_runs WHERE input_fingerprint = ?",
+        [run.input_fingerprint],
+    ).fetchone()
+    if existing is not None:
+        return str(existing[0])
+
+    connection.execute(
+        """
+        INSERT INTO projection_runs (
+            run_id, gameweek, model_name, model_version, scoring_rules_version, input_fingerprint,
+            as_of, created_at, is_partial, notes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            run.run_id,
+            run.gameweek,
+            run.model_name,
+            run.model_version,
+            run.scoring_rules_version,
+            run.input_fingerprint,
+            run.as_of,
+            run.created_at,
+            run.is_partial,
+            run.notes,
+        ],
+    )
+    connection.executemany(
+        """
+        INSERT INTO player_fixture_projections (
+            run_id, gameweek, player_fpl_id, fixture_fpl_id, expected_points,
+            expected_goals, expected_assists, p_start, p_60_plus, p_clean_sheet,
+            appearance_points, goal_points, assist_points, clean_sheet_points,
+            save_points, defensive_contribution_points, bonus_points,
+            goals_conceded_points, card_points
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                row.run_id,
+                row.gameweek,
+                row.player_fpl_id,
+                row.fixture_fpl_id,
+                row.expected_points,
+                row.expected_goals,
+                row.expected_assists,
+                row.p_start,
+                row.p_60_plus,
+                row.p_clean_sheet,
+                row.appearance_points,
+                row.goal_points,
+                row.assist_points,
+                row.clean_sheet_points,
+                row.save_points,
+                row.defensive_contribution_points,
+                row.bonus_points,
+                row.goals_conceded_points,
+                row.card_points,
+            )
+            for row in rows
+        ],
+    )
+    return run.run_id
+
+
+def select_gameweek_projection_run(
+    connection: duckdb.DuckDBPyConnection,
+    gameweek: int,
+    run_id: str,
+    selected_at: datetime,
+    *,
+    selection_reason: str,
+) -> None:
+    """Set the run used as the official forecast for one gameweek.
+
+    This changes only a pointer, keeping every historical forecast intact.  The
+    caller supplies ``selected_at`` explicitly to retain a reproducible audit
+    trail; the normal policy is the final successful run before the deadline.
+    """
+    row = connection.execute(
+        "SELECT gameweek FROM projection_runs WHERE run_id = ?", [run_id]
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"projection run {run_id} does not exist")
+    if row[0] != gameweek:
+        raise ValueError(f"projection run {run_id} does not belong to gameweek {gameweek}")
+    connection.execute(
+        """
+        INSERT INTO gameweek_projection_selections (
+            gameweek, run_id, selected_at, selection_reason
+        ) VALUES (?, ?, ?, ?)
+        ON CONFLICT (gameweek) DO UPDATE SET
+            run_id = excluded.run_id,
+            selected_at = excluded.selected_at,
+            selection_reason = excluded.selection_reason
+        """,
+        [gameweek, run_id, selected_at, selection_reason],
     )
