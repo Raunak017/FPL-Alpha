@@ -34,3 +34,17 @@ def test_consensus_averages_books():
     assert len(probs) == 2
     assert probs[0].prob == pytest.approx(0.5)
     assert probs[0].n_books == 2
+
+
+def test_consensus_excludes_a_material_cross_book_outlier():
+    books = [
+        [2.0, 4.0, 4.0],
+        [1.9, 4.2, 4.2],
+        [1.25, 10.0, 10.0],  # Implies an implausibly strong home favourite.
+    ]
+
+    probs = consensus("F1", "h2h", ["home", "draw", "away"], books)
+
+    expected_home = sum(devig_proportional(book)[0] for book in books[:2]) / 2
+    assert probs[0].prob == pytest.approx(expected_home)
+    assert all(probability.n_books == 2 for probability in probs)

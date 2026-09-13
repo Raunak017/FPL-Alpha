@@ -102,9 +102,10 @@ def player_history_from_gameweek_live(
 
         live_element = live_elements.get(player.fpl_id)
         if live_element is None:
-            raise ValueError(
-                f"Gameweek {gameweek} live payload is missing player {player.fpl_id}"
-            )
+            # The current bootstrap roster can include a player transferred in
+            # after this gameweek; FPL's historical live payload has no row.
+            # Do not fabricate a record against the player's current team.
+            continue
         history.append(
             _player_history_from_live_stats(
                 player, team_fixtures[0], gameweek, live_element["stats"]

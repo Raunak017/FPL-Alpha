@@ -54,13 +54,13 @@ def main() -> None:
         history_by_gameweek = {}
         for gameweek in pending_gameweeks:
             live_history, element_summary_player_ids = fpl.player_history_from_gameweek_live(
-                gameweek, fpl.event_live(gameweek), players, fixtures
+                gameweek, fpl.event_live(gameweek, force=args.force), players, fixtures
             )
             element_summary_history = [
                 record
                 for player_id in element_summary_player_ids
                 for record in fpl.player_history_from_element_summary(
-                    player_id, fpl.element_summary(player_id)
+                    player_id, fpl.element_summary(player_id, force=args.force)
                 )
                 if record.gameweek == gameweek
             ]

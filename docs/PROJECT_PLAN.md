@@ -4,11 +4,12 @@
 
 Build a market-informed FPL projection and optimization engine that combines official FPL data, football statistics, betting markets, expected minutes, and simulation to estimate player expected points and recommend squad decisions.
 
-## Status (as of 2026-08-25)
+## Status (as of 2026-09-13)
 
-Steps **1, 2, and 4** are code-complete; Step 3 has its core methods but still
-needs outlier handling and bookmaker weighting. PropLine live capture has been
-validated on EPL events. Player-level work (steps 5+) has not started.
+Steps **1–4** are code-complete. PropLine live capture has been validated on
+EPL events. Step 3 uses conservative robust outlier rejection and intentionally
+equal bookmaker weights until historical calibration data justifies weighting.
+Player-level work (steps 5+) has not started.
 
 **Legend:** ✅ done · 🟡 partial (see `[remaining: …]` in the heading) · ⬜ not started
 
@@ -16,7 +17,7 @@ validated on EPL events. Player-level work (steps 5+) has not started.
 |------|--------|
 | 1. FPL Data Ingestion | ✅ done |
 | 2. Betting Odds Ingestion | ✅ done |
-| 3. No-Vig Market Probabilities | 🟡 partial |
+| 3. No-Vig Market Probabilities | ✅ done |
 | 4. Market-Implied Team xG | ✅ done |
 | 5–12 (player projections → optimizer) | ⬜ not started |
 
@@ -97,14 +98,18 @@ cache-first with `scripts/refresh_propline_odds.py`. Events map to FPL fixtures
 by home team, away team, and kickoff; player props are fixture-team-scoped and
 use explicit aliases or strict normalization, leaving unresolved labels `NULL`.*
 
-### 3. No-Vig Market Probabilities — 🟡 partial [remaining: outlier handling + book weighting]
+### 3. No-Vig Market Probabilities — ✅ done
 Convert bookmaker odds into fair probabilities by:
 
 - ✅ Removing bookmaker margin — `markets.devig_proportional` (proportional method)
 - ✅ Combining multiple bookmakers — `markets.consensus` (equal-weighted average)
-- 🟡 Handling outliers and missing markets — consensus averages equally for now; no outlier rejection / sharpness weighting yet
+- ✅ Reading latest complete DuckDB bookmaker snapshots — `markets.consensus_from_latest_odds`
+- ✅ Rejecting material cross-book outliers — per-market robust MAD rule on de-vigged logit probabilities; fewer than three complete books are retained
+- ✅ Equal bookmaker weighting — the V1 policy; evidence-based sharpness weighting is deferred until settled-price calibration data exists
 
-*Implemented in `src/fpl_alpha/markets.py`; tested in `tests/test_markets.py`.*
+*The current bridge supports h2h, BTTS, and the match-total line nearest 2.5;
+incomplete books and team totals are excluded. Run it with
+`python scripts/build_market_consensus.py --fixture-id <fpl_fixture_id>`.*
 
 ### 4. Market-Implied Team xG — ✅ done
 Use match markets to estimate:
@@ -211,7 +216,7 @@ Start with Steps **1–4**:
 
 1. ✅ FPL data
 2. ✅ Betting data (PropLine live ingestion and DuckDB persistence)
-3. 🟡 Fair market probabilities (core done; outlier handling remaining)
+3. ✅ Fair market probabilities
 4. ✅ Market-implied team xG
 
 The step 3→4 chain runs today via `scripts/demo_market_to_xg.py` (offline example odds). PropLine now supplies live cached and persisted odds; connecting those DuckDB snapshots to the consensus and team-xG stages is separate follow-on work. Then move into player-level projections.
