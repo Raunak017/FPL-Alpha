@@ -107,6 +107,7 @@ def test_gameweek_live_uses_team_schedule_for_blank_single_and_dgw_routing():
         Player(11, "Away", "Away Player", 2, "MID", 75),
         Player(12, "Double", "Double Player", 3, "MID", 75),
         Player(13, "Blank", "Blank Player", 4, "MID", 75),
+        Player(14, "New", "New Player", 1, "MID", 75),
     ]
     fixtures = [_fixture(100, 1, 2), _fixture(101, 3, 5), _fixture(102, 6, 3)]
     live = {

@@ -59,7 +59,7 @@ def _snapshot(
     )
 
 
-def test_open_database_initializes_all_fpl_tables(tmp_path):
+def test_open_database_initializes_fpl_and_odds_tables(tmp_path):
     connection = open_database(tmp_path / "fpl_alpha.duckdb")
     try:
         tables = {
@@ -79,6 +79,11 @@ def test_open_database_initializes_all_fpl_tables(tmp_path):
         "player_snapshots",
         "player_gameweek_history",
         "gameweek_history_ingestions",
+        "odds_provider_events",
+        "odds_event_fixture_mappings",
+        "odds_bookmakers",
+        "odds_player_mappings",
+        "odds_outcome_snapshots",
     } <= tables
 
 
