@@ -48,3 +48,6 @@ At completion, report only:
 
 - What changed
 - Anything still unresolved
+
+## Changelog
+- **ALWAYS** update `CHANGELOG.md` when completing a task or making meaningful code changes. Include a brief summary of what was added, changed, or fixed.

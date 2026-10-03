@@ -201,25 +201,9 @@ def attack_weights_from_bootstrap(
     bootstrap: dict[str, Any],
     *,
     gate_availability: bool = True,
+    games_played: float = 38.0,
 ) -> dict[int, PlayerRates]:
     """Per-match attacking weights with minutes + shrinkage (Plan steps 5-7).
-
-    The upgrade over :func:`attack_rates_from_bootstrap` (which uses raw season
-    totals): each player's weight is a **per-match expected contribution**
-
-        weight = shrink_rate(xg_per_90 → positional prior) · expected_minutes / 90
-
-    which fixes two things at once:
-
-    - **Thin-squad concentration.** A zero-history teammate no longer weighs 0 —
-      :func:`shrink_rate` pulls them to a positional baseline — so one historied
-      player can't absorb the whole team λ (the "Lukić" artifact).
-    - **Rotation.** Expected minutes scale the weight, so a fit-but-rotated player
-      contributes less than a nailed starter of the same rate.
-
-    Availability is folded into ``expected_minutes``, so the returned
-    ``PlayerRates.available`` is 1.0 (already applied). The result plugs straight
-    into :func:`allocate_fixture`.
     """
     out: dict[int, PlayerRates] = {}
     for e in bootstrap["elements"]:
@@ -230,7 +214,7 @@ def attack_weights_from_bootstrap(
             if gate_availability
             else 1.0
         )
-        emin = expected_minutes(mins, avail)
+        emin = expected_minutes(mins, avail, games_played=games_played)
         play_frac = emin / FULL_MATCH
         wx = shrink_rate(_to_float(e.get("expected_goals_per_90")), mins, POS_XG90_PRIOR[pos]) * play_frac
         wa = shrink_rate(_to_float(e.get("expected_assists_per_90")), mins, POS_XA90_PRIOR[pos]) * play_frac

@@ -49,42 +49,37 @@ def availability_factor(status: str | None, chance_next: float | int | None) -> 
 
 
 def expected_minutes(
-    minutes_last_season: float,
+    minutes_total: float,
     availability: float,
+    games_played: float = 38.0,
     *,
     prior: float = PRIOR_MINUTES,
     k: float = K_MINUTES,
 ) -> float:
     """Per-fixture expected minutes in [0, 90]: fitness-gated, shrunk to ``prior``.
-
-    A player's own minutes-per-game (last-season minutes / 38, capped at 90) is
-    blended with ``prior`` by evidence weight ``minutes / (minutes + k)``, then
-    scaled by ``availability``. Zero-history fit players land at
-    ``availability · prior`` rather than 0.
     """
-    mins = max(0.0, float(minutes_last_season))
-    mpg = min(FULL_MATCH, mins / GAMES_PER_SEASON)
+    mins = max(0.0, float(minutes_total))
+    games = max(1.0, float(games_played))
+    mpg = min(FULL_MATCH, mins / games)
     w = mins / (mins + k) if (mins + k) > 0 else 0.0
     est = w * mpg + (1.0 - w) * prior
     return availability * min(FULL_MATCH, est)
 
 
 def start_probability(
-    starts_last_season: float,
-    minutes_last_season: float,
+    starts_total: float,
+    minutes_total: float,
     availability: float,
+    games_played: float = 38.0,
     *,
     prior: float = PRIOR_START,
     k: float = K_MINUTES,
 ) -> float:
     """Probability of starting in [0, 1]: fitness-gated, shrunk to ``prior``.
-
-    Uses the observed start rate (starts / 38) as the signal and *minutes* as the
-    evidence weight — so a high-minute perennial sub (0 starts) correctly shrinks
-    toward a low start prob, while a 0-minute new player falls back to ``prior``.
     """
-    mins = max(0.0, float(minutes_last_season))
-    rate = min(1.0, max(0.0, float(starts_last_season)) / GAMES_PER_SEASON)
+    mins = max(0.0, float(minutes_total))
+    games = max(1.0, float(games_played))
+    rate = min(1.0, max(0.0, float(starts_total)) / games)
     w = mins / (mins + k) if (mins + k) > 0 else 0.0
     est = w * rate + (1.0 - w) * prior
     return availability * min(1.0, est)

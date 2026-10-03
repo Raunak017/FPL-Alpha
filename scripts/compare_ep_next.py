@@ -113,6 +113,53 @@ def _next_gameweek(bootstrap: dict) -> int:
     return next_events[0]
 
 
+def _process_model_to_rows(model, cs, fixture_fpl_id, home, away, rates, el, POS, GOAL_PTS, ASSIST_PTS, CS_PTS, APPEARANCE_PTS, rows):
+    for r in allocate_fixture(model, rates):
+        e = el[r.fpl_id]
+        pos = POS.get(e["element_type"], "UNK")
+        
+        # Using projection builder for the partial calculation
+        from fpl_alpha.projections import project_player_fixture
+        from fpl_alpha.schemas import Player, PlayerSnapshot
+        from datetime import datetime, timezone
+        
+        dummy_player = Player(
+            fpl_id=r.fpl_id, web_name=e["web_name"], full_name="", team_fpl_id=r.team_fpl_id, 
+            position=pos, now_cost=0
+        )
+        dummy_snapshot = PlayerSnapshot(
+            player_fpl_id=r.fpl_id, captured_at=datetime.now(timezone.utc), now_cost=0, 
+            selected_by_percent=0.0, status=e.get("status", "a"), total_points=0, points_per_game=0.0, 
+            form=0.0, minutes=int(_f(e.get("minutes"))), starts=int(_f(e.get("starts"))), goals_scored=0, assists=0,
+            clean_sheets=0, bonus=0, bps=0, expected_goals=0.0, expected_assists=0.0, 
+            expected_goal_involvements=0.0, expected_goals_conceded=0.0, clean_sheets_per_90=0.0, 
+            defensive_contribution_per_90=0.0, expected_goals_per_90=0.0, expected_assists_per_90=0.0, 
+            expected_goal_involvements_per_90=0.0, expected_goals_conceded_per_90=0.0, goals_conceded_per_90=0.0, 
+            saves_per_90=0.0, starts_per_90=0.0, influence=0.0, creativity=0.0, threat=0.0, ict_index=0.0,
+            chance_of_playing_next_round=e.get("chance_of_playing_next_round"), chance_of_playing_this_round=None, 
+            transfers_in_event=0, transfers_out_event=0, transfers_in=0, transfers_out=0
+        )
+        
+        proj = project_player_fixture(
+            player=dummy_player, snapshot=dummy_snapshot, attack=r,
+            p_clean_sheet=cs[r.team_fpl_id], fixture_fpl_id=fixture_fpl_id or 0
+        )
+        
+        xpts = proj.expected_points
+        
+        rows.append({
+            "player_fpl_id": r.fpl_id,
+            "fixture_fpl_id": fixture_fpl_id,
+            "name": e["web_name"], "team": home.short_name if r.team_fpl_id == home.fpl_id else away.short_name,
+            "pos": pos, "ours": xpts, "ep_next": _f(e.get("ep_next")),
+            "xg": r.exp_goals, "xa": r.exp_assists, "p_start": proj.p_start, "p_cs": cs[r.team_fpl_id],
+            "appearance_points": proj.appearance_points,
+            "goal_points": proj.goal_points,
+            "assist_points": proj.assist_points,
+            "clean_sheet_points": proj.clean_sheet_points,
+            "proj_obj": proj,
+        })
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--store", action="store_true", help="persist this partial projection run to DuckDB")
@@ -123,6 +170,7 @@ def main() -> None:
         action="store_true",
         help="set this run as the selected decision forecast for its gameweek (requires --store)",
     )
+    ap.add_argument("--mock-odds", action="store_true", help="Bypass odds API and use a static 1.5 vs 1.2 goal expectation for all fixtures to test the downstream engine.")
     args = ap.parse_args()
     if args.select and not args.store:
         ap.error("--select requires --store")
@@ -132,17 +180,16 @@ def main() -> None:
     bootstrap_path = RAW / "fpl" / "bootstrap-static.json"
     odds_path = RAW / "the-odds-api" / "theoddsapi-epl-h2h+totals-uk.json"
     boot = json.loads(bootstrap_path.read_text())
+
+    target_gameweek = args.gameweek or _next_gameweek(boot)
+    games_played = max(1.0, float(target_gameweek - 1))
     teams = teams_from_bootstrap(boot)
-    rates = attack_weights_from_bootstrap(boot)  # shrunk + minutes-weighted
+    rates = attack_weights_from_bootstrap(boot, games_played=games_played)  # shrunk + minutes-weighted
 
     el = {e["id"]: e for e in boot["elements"]}
-    events = json.loads(odds_path.read_text())
-    fixtures = odds.parse_the_odds_api_events(events)
 
-    target_gameweek = args.gameweek
     fixture_ids: dict[tuple[int, int], int] = {}
     if args.store:
-        target_gameweek = target_gameweek or _next_gameweek(boot)
         fpl_fixtures_path = RAW / "fpl" / "fixtures.json"
         fpl_fixtures = fpl.fixtures_from_api(json.loads(fpl_fixtures_path.read_text()))
         fixture_ids = {
@@ -155,49 +202,83 @@ def main() -> None:
 
     rows: list[dict] = []
     unmatched_fixtures: list[str] = []
-    for fo in fixtures:
-        home = match_odds_name(fo.home_team, teams)
-        away = match_odds_name(fo.away_team, teams)
-        if home is None or away is None:
-            if args.store:
-                unmatched_fixtures.append(f"{fo.home_team} v {fo.away_team} (unmatched team name)")
-            continue
-        fixture_fpl_id = fixture_ids.get((home.fpl_id, away.fpl_id)) if args.store else None
-        if args.store and fixture_fpl_id is None:
-            unmatched_fixtures.append(f"{fo.home_team} v {fo.away_team} (no FPL fixture in GW {target_gameweek})")
-            continue
-        fid = f"{home.short_name}_v_{away.short_name}"
-        mps = consensus(fid, "h2h", ["home", "draw", "away"], fo.h2h)
-        if fo.totals:
-            mps += consensus(fid, f"totals_{fo.totals_line}", ["over", "under"], fo.totals)
-        model = fit_team_goals(fid, home.fpl_id, away.fpl_id, mps)
-        cs = {home.fpl_id: model.p_clean_sheet_home, away.fpl_id: model.p_clean_sheet_away}
 
+    def _process_model_to_rows(model, cs, fixture_fpl_id, home, away, rates, el, POS, GOAL_PTS, ASSIST_PTS, CS_PTS, APPEARANCE_PTS, rows, games_played):
+        from fpl_alpha.projections import project_player_fixture
+        from fpl_alpha.schemas import Player, PlayerSnapshot
+        from datetime import datetime, timezone
         for r in allocate_fixture(model, rates):
             e = el[r.fpl_id]
             pos = POS.get(e["element_type"], "UNK")
-            # P(start) from the step-7 minutes model (fitness × shrunk start rate).
-            p_start = start_probability(
-                _f(e.get("starts")), _f(e.get("minutes")),
-                availability_factor(e.get("status"), e.get("chance_of_playing_next_round")),
+            dummy_player = Player(
+                fpl_id=r.fpl_id, web_name=e["web_name"], full_name="", team_fpl_id=r.team_fpl_id, 
+                position=pos, now_cost=0
             )
-            xpts = (
-                p_start * APPEARANCE_PTS
-                + r.exp_goals * GOAL_PTS.get(pos, 0)
-                + r.exp_assists * ASSIST_PTS
-                + p_start * cs[r.team_fpl_id] * CS_PTS.get(pos, 0)
+            dummy_snapshot = PlayerSnapshot(
+                player_fpl_id=r.fpl_id, captured_at=datetime.now(timezone.utc), now_cost=0, 
+                selected_by_percent=0.0, status=e.get("status", "a"), total_points=0, points_per_game=0.0, 
+                form=0.0, minutes=int(_f(e.get("minutes"))), starts=int(_f(e.get("starts"))), goals_scored=0, assists=0,
+                clean_sheets=0, bonus=0, bps=0, expected_goals=0.0, expected_assists=0.0, 
+                expected_goal_involvements=0.0, expected_goals_conceded=0.0, clean_sheets_per_90=0.0, 
+                defensive_contribution_per_90=0.0, expected_goals_per_90=0.0, expected_assists_per_90=0.0, 
+                expected_goal_involvements_per_90=0.0, expected_goals_conceded_per_90=0.0, goals_conceded_per_90=0.0, 
+                saves_per_90=0.0, starts_per_90=0.0, influence=0.0, creativity=0.0, threat=0.0, ict_index=0.0,
+                chance_of_playing_next_round=e.get("chance_of_playing_next_round"), chance_of_playing_this_round=None, 
+                transfers_in_event=0, transfers_out_event=0, transfers_in=0, transfers_out=0
             )
+            proj = project_player_fixture(
+                player=dummy_player, snapshot=dummy_snapshot, attack=r,
+                p_clean_sheet=cs[r.team_fpl_id], fixture_fpl_id=fixture_fpl_id or 0, games_played=games_played
+            )
+            xpts = proj.expected_points
             rows.append({
-                "player_fpl_id": r.fpl_id,
-                "fixture_fpl_id": fixture_fpl_id,
+                "player_fpl_id": r.fpl_id, "fixture_fpl_id": fixture_fpl_id,
                 "name": e["web_name"], "team": home.short_name if r.team_fpl_id == home.fpl_id else away.short_name,
                 "pos": pos, "ours": xpts, "ep_next": _f(e.get("ep_next")),
-                "xg": r.exp_goals, "xa": r.exp_assists, "p_start": p_start, "p_cs": cs[r.team_fpl_id],
-                "appearance_points": p_start * APPEARANCE_PTS,
-                "goal_points": r.exp_goals * GOAL_PTS.get(pos, 0),
-                "assist_points": r.exp_assists * ASSIST_PTS,
-                "clean_sheet_points": p_start * cs[r.team_fpl_id] * CS_PTS.get(pos, 0),
+                "xg": r.exp_goals, "xa": r.exp_assists, "p_start": proj.p_start, "p_cs": cs[r.team_fpl_id],
+                "appearance_points": proj.appearance_points, "goal_points": proj.goal_points,
+                "assist_points": proj.assist_points, "clean_sheet_points": proj.clean_sheet_points, "proj_obj": proj,
             })
+
+    if getattr(args, "mock_odds", False):
+        target_gameweek = target_gameweek or _next_gameweek(boot)
+        fpl_fixtures_path = RAW / "fpl" / "fixtures.json"
+        fpl_fixtures = fpl.fixtures_from_api(json.loads(fpl_fixtures_path.read_text()))
+        gameweek_fixtures = [f for f in fpl_fixtures if f.event == target_gameweek]
+        from fpl_alpha.team_xg import poisson_pmf, score_matrix
+        from fpl_alpha.schemas import TeamGoalModel
+        for fixture in gameweek_fixtures:
+            home_team = next(t for t in teams if t.fpl_id == fixture.team_h_fpl_id)
+            away_team = next(t for t in teams if t.fpl_id == fixture.team_a_fpl_id)
+            fixture_id = f"{home_team.short_name}_v_{away_team.short_name}"
+            model = TeamGoalModel(
+                fixture_id=fixture_id, home_team_fpl_id=home_team.fpl_id, away_team_fpl_id=away_team.fpl_id,
+                lambda_home=1.5, lambda_away=1.2, p_clean_sheet_home=poisson_pmf(0, 1.2),
+                p_clean_sheet_away=poisson_pmf(0, 1.5), score_dist=score_matrix(1.5, 1.2)
+            )
+            cs = {home_team.fpl_id: model.p_clean_sheet_home, away_team.fpl_id: model.p_clean_sheet_away}
+            _process_model_to_rows(model, cs, fixture.fpl_id, home_team, away_team, rates, el, POS, GOAL_PTS, ASSIST_PTS, CS_PTS, APPEARANCE_PTS, rows, games_played)
+    else:
+        events = json.loads(odds_path.read_text())
+        fixtures = odds.parse_the_odds_api_events(events)
+        for fo in fixtures:
+            home = match_odds_name(fo.home_team, teams)
+            away = match_odds_name(fo.away_team, teams)
+            if home is None or away is None:
+                if args.store:
+                    unmatched_fixtures.append(f"{fo.home_team} v {fo.away_team} (unmatched team name)")
+                continue
+            fixture_fpl_id = fixture_ids.get((home.fpl_id, away.fpl_id)) if args.store else None
+            if args.store and fixture_fpl_id is None:
+                unmatched_fixtures.append(f"{fo.home_team} v {fo.away_team} (no FPL fixture in GW {target_gameweek})")
+                continue
+            fid = f"{home.short_name}_v_{away.short_name}"
+            mps = consensus(fid, "h2h", ["home", "draw", "away"], fo.h2h)
+            if fo.totals:
+                mps += consensus(fid, f"totals_{fo.totals_line}", ["over", "under"], fo.totals)
+            model = fit_team_goals(fid, home.fpl_id, away.fpl_id, mps)
+            cs = {home.fpl_id: model.p_clean_sheet_home, away.fpl_id: model.p_clean_sheet_away}
+            _process_model_to_rows(model, cs, fixture_fpl_id, home, away, rates, el, POS, GOAL_PTS, ASSIST_PTS, CS_PTS, APPEARANCE_PTS, rows, games_played)
 
     if args.store and unmatched_fixtures:
         raise ValueError("cannot persist an incomplete gameweek: " + "; ".join(unmatched_fixtures))
@@ -260,7 +341,7 @@ def main() -> None:
         print(f"Stored partial projection run {stored_run_id} for GW{target_gameweek} ({len(projections)} rows).")
 
     print(__doc__.split("\n\n")[0])
-    print(f"\n{len(rows)} players across {sum(1 for _ in fixtures)} GW1 fixtures "
+    print(f"\n{len(rows)} players across {len(set(r['fixture_fpl_id'] for r in rows))} GW1 fixtures "
           f"(cached, availability-gated).\n")
 
     # (a) Top 20 by OUR partial xPts
