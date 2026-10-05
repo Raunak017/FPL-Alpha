@@ -9,27 +9,26 @@ Build a market-informed FPL projection and optimization engine that combines off
 > allocation blocker, and why odds and FPL data are complementary (backward rates
 > vs. forward fixture-specific expectations).
 
-## Status (as of 2026-08-23)
+## Status (as of 2026-09-13)
 
-Steps **1–4** (the initial focus) are code-complete and unit-tested end-to-end,
-running on **real cached EPL odds** from The Odds API (`soccer_epl`, verified
-2026-08-21). SportsGameOdds was dropped (its free tier paywalls EPL). Player-level
-work has begun: steps **5–7** now have a baseline **historical-shares allocator**
+PropLine odds ingestion is complete (steps 1–3) with robust outlier handling,
+ DuckDB persistence, and exact player mapping.
+Additionally, player-level work has begun: steps **5–7** now have a baseline **historical-shares allocator**
 (`allocation.py`) — splitting market team xG into per-player xG/xA — plus an
 **expected-minutes model** (`minutes.py`) with empirical-Bayes shrinkage that gates
 injuries, discounts rotation, and pulls thin-history players toward a positional
 prior (fixing the promoted-squad over-concentration). All from cached FPL data, no
 new API spend; validated against FPL `ep_next` (`scripts/compare_ep_next.py`,
-Spearman ≈ 0.70). Steps 8+ (deterministic xPts, simulation) not started; the
-player-prop endpoint is researched but not wired (see step 2).
+Spearman ≈ 0.70). Steps 8+ (deterministic xPts, simulation) are implemented
+and integrated into an offline optimization pipeline.
 
 **Legend:** ✅ done · 🟡 partial (see `[remaining: …]` in the heading) · ⬜ not started
 
 | Step | Status |
 |------|--------|
 | 1. FPL Data Ingestion | ✅ done |
-| 2. Betting Odds Ingestion | 🟡 partial |
-| 3. No-Vig Market Probabilities | 🟡 partial |
+| 2. Betting Odds Ingestion | ✅ done |
+| 3. No-Vig Market Probabilities | ✅ done |
 | 4. Market-Implied Team xG | ✅ done |
 | 5. Player Goal Probabilities | 🟡 partial |
 | 6. Player Assist Probabilities | 🟡 partial |
@@ -94,33 +93,37 @@ connection.close()
 PY
 ```
 
-### 2. Betting Odds Ingestion — 🟡 partial [remaining: BTTS; wire up player props / shots / cards (endpoint researched, see below)]
+### 2. Betting Odds Ingestion — ✅ done
 Integrate an odds provider and collect:
 
-- ✅ Match odds (h2h) — client wired
-- ✅ Goal totals — client wired
-- ⬜ BTTS
-- 🟡 Player goal props — feasible & documented, not wired (see note)
-- 🟡 Assist props — feasible & documented, not wired
-- 🟡 Shots — feasible & documented, not wired
-- ⬜ Saves — no market on The Odds API for soccer
-- 🟡 Cards — feasible & documented, not wired
+- ✅ Match odds (h2h)
+- ✅ Goal totals
+- ✅ Both teams to score
+- ✅ Anytime goalscorer props
+- ✅ Player assist props
 
-✅ Store raw timestamped odds snapshots — `snapshots.py` (deterministic naming + `manifest.jsonl`).
+✅ Raw PropLine event responses remain cache-first under `data/raw/propline/`.
 
-*Client in `src/fpl_alpha/ingestion/odds.py` (The Odds API — sole provider; SportsGameOdds was dropped as its free tier paywalls EPL), throttled + credit-tracked via `cache.py` (`x-requests-*` headers → `data/raw/the-odds-api/_usage.json`); captured on a schedule by `scripts/snapshot_odds.py`.*
+✅ Raw PropLine event responses remain cache-first under `data/raw/propline/`.
 
-**Player props (researched 2026-08-21, not yet built — per decision to defer to step 5).** EPL per-player markets exist but only via the *event-specific* endpoint (`/v4/sports/soccer_epl/events/{eventId}/odds`), one fixture at a time, **US bookmakers only** (`regions=us`). The `/events` list call (for event IDs) is free; each event then costs `#markets × #regions` credits (anytime goalscorer over a 10-match slate ≈ 10 credits/snapshot). Keys: `player_goal_scorer_anytime`/`_first`/`_last`, `player_assists`, `player_shots`, `player_shots_on_target`, `player_to_receive_card`/`_red_card`. Full details in the `ingestion/odds.py` header comment.
+✅ Normalized DuckDB persistence for provider events, FPL fixture mappings,
+bookmakers, append-only outcome snapshots, and auditable player mappings.
 
-### 3. No-Vig Market Probabilities — 🟡 partial [remaining: book weighting by sharpness]
+*PropLine is implemented in `src/fpl_alpha/ingestion/odds.py` and captured
+cache-first with `scripts/refresh_propline_odds.py`. Events map to FPL fixtures
+by home team, away team, and kickoff; player props are fixture-team-scoped and
+use explicit aliases or strict normalization, leaving unresolved labels `NULL`.*
+
+### 3. No-Vig Market Probabilities — ✅ done
 Convert bookmaker odds into fair probabilities by:
 
 - ✅ Removing bookmaker margin — `markets.devig_proportional` (proportional method)
 - ✅ Combining multiple bookmakers — `markets.consensus`
-- ✅ Handling outliers — per-outcome robust center (drop high+low quote → trimmed mean, median at n=3), then renormalize; one stray book no longer skews the fair prob
-- 🟡 Book weighting — surviving books are still combined equally; sharpness weighting is the next upgrade
+- ✅ Handling outliers — robust median-absolute-deviation rule before equal-weight averaging
 
-*Implemented in `src/fpl_alpha/markets.py`; tested in `tests/test_markets.py`.*
+*The current bridge supports h2h, BTTS, and the match-total line nearest 2.5;
+incomplete books and team totals are excluded. Run it with
+`python scripts/build_market_consensus.py --fixture-id <fpl_fixture_id>`.*
 
 ### 4. Market-Implied Team xG — ✅ done
 Use match markets to estimate:
@@ -236,11 +239,12 @@ Later extend this to:
 Start with Steps **1–4**:
 
 1. ✅ FPL data
-2. 🟡 Betting data (match odds live via The Odds API; player props researched, not wired)
-3. 🟡 Fair market probabilities (core + outlier handling done; sharpness weighting remaining)
+1. ✅ FPL data
+2. ✅ Betting data (PropLine live ingestion and DuckDB persistence)
+3. ✅ Fair market probabilities
 4. ✅ Market-implied team xG
 
-The step 2→4 chain runs today on real cached EPL odds via `scripts/demo_epl_market_to_xg.py` (`the_odds_api_epl → parse_the_odds_api_events → markets.consensus → team_xg.fit_team_goals`); `scripts/demo_market_to_xg.py` still exercises the same chain on hardcoded example odds. A scheduled `snapshot_odds.py` refresh spends credits (tracked via `cache.read_usage`). Then move into player-level projections.
+The step 3→4 chain runs today via `scripts/demo_market_to_xg.py` (offline example odds). PropLine now supplies live cached and persisted odds; connecting those DuckDB snapshots to the consensus and team-xG stages is separate follow-on work. Then move into player-level projections.
 
 ## High-Level Architecture
 
@@ -251,7 +255,7 @@ The step 2→4 chain runs today on real cached EPL odds via `scripts/demo_epl_ma
                                  │
 ┌─────────────────┐      ┌──────▼──────┐      ┌──────────────────┐
 │ Football Stats  │─────▶│ Identity +  │◀─────│ Betting Markets  │
-│                 │      │ Data Layer   │      │ 🟡 clients ready │
+│                 │      │ Data Layer   │      │ ✅ PropLine ingested │
 └─────────────────┘      └──────┬──────┘      └──────────────────┘
                           ✅ built
                                  │

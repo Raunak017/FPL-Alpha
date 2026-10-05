@@ -102,12 +102,10 @@ def player_history_from_gameweek_live(
 
         live_element = live_elements.get(player.fpl_id)
         if live_element is None:
-            # Registered after this gameweek: new players are appended to
-            # bootstrap-static with fresh ids, but the historical
-            # event/{gw}/live snapshot is never backfilled with them. Such a
-            # player has no history for a gameweek they weren't part of — skip.
-            # (Anyone who actually featured is guaranteed to be in the live
-            # payload, so this only ever drops genuine post-gameweek additions.)
+            # The current bootstrap roster can include a player transferred in
+            # after this gameweek; FPL's historical live payload has no row.
+            # Do not fabricate a record against the player's current team.
+
             continue
         history.append(
             _player_history_from_live_stats(

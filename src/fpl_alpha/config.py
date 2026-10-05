@@ -41,6 +41,7 @@ USER_AGENT = "fpl-alpha/0.1 (+https://github.com/RushiPardeshi)"
 
 # --- Secrets / IDs ----------------------------------------------------------
 ODDS_API_KEY = os.environ.get("ODDS_API_KEY")
+PROPLINE_API_KEY = os.environ.get("PROPLINE_API_KEY")
 FPL_TEAM_ID = os.environ.get("FPL_TEAM_ID")
 FPL_TEAM_ID_DEV2 = os.environ.get("FPL_TEAM_ID_DEV2")
 
@@ -78,4 +79,12 @@ THE_ODDS_API = ProviderLimits(
     note="~500 credits/mo; credits = #markets x #regions per call (x10 for historical)",
     monthly_budget=500,        # free-tier credits; consumed per markets x regions
     low_budget_threshold=50,   # warn when <10% of the monthly budget remains
+)
+
+PROPLINE = ProviderLimits(
+    name="propline",
+    base_url="https://api.prop-line.com/v1",
+    min_interval_s=2.0,
+    cache_ttl_s=60 * 10,
+    note="request only selected EPL events and markets; cache-first",
 )
