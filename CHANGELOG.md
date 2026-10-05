@@ -9,6 +9,10 @@ All notable changes to this project will be documented in this file.
 - **Reporting Bug**: Fixed an `UnboundLocalError` in `scripts/compare_ep_next.py` when running offline.
 
 ### Added
+- **FPL Strength Fallback**: Added `fit_fpl_team_goals()` to `team_xg.py` to map FPL's native 1-5 FDR ratings into expected goals multipliers, removing the reliance on dummy flat goals during offline runs.
+- **End-to-End Optimization Script**: Created `scripts/optimize_team.py` to calculate projected points and run a Mixed Integer Linear Programming (MILP) model to output the mathematically optimal 15-man Wildcard squad and Starting XI + Captain.
+- **xPts Explorer CLI**: Created `scripts/explore_xpts.py` allowing users to dynamically filter and sort expected points against FPL form, positions, and prices.
+- **GLPK Solver Support**: Integrated `pulp.GLPK_CMD(msg=False)` fallback into `optimization.py` to support Apple Silicon machines where default CBC binaries crash.
 - **Mock Odds Testing**: Added a `--mock-odds` flag to `scripts/compare_ep_next.py` to bypass the external Odds API and allow testing the deterministic xPts engine locally using a flat 1.5 vs 1.2 dummy goal model.
 - Wired `games_played` dynamically through `allocation.py` and `projections.py` to ensure accurate early-season scaling.
 

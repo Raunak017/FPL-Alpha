@@ -171,3 +171,44 @@ def fit_team_goals(
         p_clean_sheet_away=poisson_pmf(0, lh),
         score_dist=score_matrix(lh, la),
     )
+
+
+def fit_fpl_team_goals(
+    fixture_id: str,
+    home_team_fpl_id: int,
+    away_team_fpl_id: int,
+    home_strength: int,
+    away_strength: int,
+) -> TeamGoalModel:
+    """Fallback: Estimate expected goals directly from FPL's 1-5 strength ratings.
+    
+    Used when the Odds API is unavailable or bypassed via --mock-odds.
+    Maps FPL's crude 1-5 strength metric (FDR) into attacking and defensive
+    multipliers to compute independent Poisson lambdas.
+    """
+    # Map FPL 1-5 scale to attacking/defending multipliers
+    # 2=weak, 3=average, 4=strong, 5=elite
+    atk_mult = {1: 0.60, 2: 0.75, 3: 1.00, 4: 1.25, 5: 1.50}
+    def_mult = {1: 1.40, 2: 1.25, 3: 1.00, 4: 0.80, 5: 0.65}
+    
+    # Base Premier League goal expectations
+    base_home = 1.55
+    base_away = 1.25
+    
+    # Clip strengths just in case FPL returns something weird
+    h_str = max(1, min(5, home_strength))
+    a_str = max(1, min(5, away_strength))
+    
+    lh = base_home * atk_mult[h_str] * def_mult[a_str]
+    la = base_away * atk_mult[a_str] * def_mult[h_str]
+    
+    return TeamGoalModel(
+        fixture_id=fixture_id,
+        home_team_fpl_id=home_team_fpl_id,
+        away_team_fpl_id=away_team_fpl_id,
+        lambda_home=lh,
+        lambda_away=la,
+        p_clean_sheet_home=poisson_pmf(0, la),
+        p_clean_sheet_away=poisson_pmf(0, lh),
+        score_dist=score_matrix(lh, la),
+    )

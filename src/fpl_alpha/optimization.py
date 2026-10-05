@@ -60,7 +60,10 @@ def optimize_wildcard(
         ) <= max_per_team
         
     # Solve
-    prob.solve()
+    try:
+        prob.solve(pulp.GLPK_CMD(msg=False))
+    except pulp.PulpSolverError:
+        prob.solve()
     
     if pulp.LpStatus[prob.status] != 'Optimal':
         raise ValueError(f"No optimal solution found. Status: {pulp.LpStatus[prob.status]}")
@@ -117,7 +120,10 @@ def optimize_starting_xi(
     prob += pulp.lpSum(start_vars[p.fpl_id] for p in squad_15 if p.position == "FWD") <= 3
 
     # Solve
-    prob.solve()
+    try:
+        prob.solve(pulp.GLPK_CMD(msg=False))
+    except pulp.PulpSolverError:
+        prob.solve()
     
     starting_xi = [p for p in squad_15 if start_vars[p.fpl_id].varValue == 1.0]
     bench = [p for p in squad_15 if start_vars[p.fpl_id].varValue == 0.0]

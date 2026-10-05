@@ -170,7 +170,7 @@ def main() -> None:
         action="store_true",
         help="set this run as the selected decision forecast for its gameweek (requires --store)",
     )
-    ap.add_argument("--mock-odds", action="store_true", help="Bypass odds API and use a static 1.5 vs 1.2 goal expectation for all fixtures to test the downstream engine.")
+    ap.add_argument("--mock-odds", action="store_true", help="Bypass odds API and use FPL's native 1-5 strength ratings (FDR) to estimate Team xG. Useful for offline testing.")
     args = ap.parse_args()
     if args.select and not args.store:
         ap.error("--select requires --store")
@@ -245,16 +245,20 @@ def main() -> None:
         fpl_fixtures_path = RAW / "fpl" / "fixtures.json"
         fpl_fixtures = fpl.fixtures_from_api(json.loads(fpl_fixtures_path.read_text()))
         gameweek_fixtures = [f for f in fpl_fixtures if f.event == target_gameweek]
-        from fpl_alpha.team_xg import poisson_pmf, score_matrix
-        from fpl_alpha.schemas import TeamGoalModel
+        from fpl_alpha.team_xg import fit_fpl_team_goals
         for fixture in gameweek_fixtures:
             home_team = next(t for t in teams if t.fpl_id == fixture.team_h_fpl_id)
             away_team = next(t for t in teams if t.fpl_id == fixture.team_a_fpl_id)
             fixture_id = f"{home_team.short_name}_v_{away_team.short_name}"
-            model = TeamGoalModel(
-                fixture_id=fixture_id, home_team_fpl_id=home_team.fpl_id, away_team_fpl_id=away_team.fpl_id,
-                lambda_home=1.5, lambda_away=1.2, p_clean_sheet_home=poisson_pmf(0, 1.2),
-                p_clean_sheet_away=poisson_pmf(0, 1.5), score_dist=score_matrix(1.5, 1.2)
+            
+            home_fpl = next(t for t in boot["teams"] if t["id"] == fixture.team_h_fpl_id)
+            away_fpl = next(t for t in boot["teams"] if t["id"] == fixture.team_a_fpl_id)
+            home_strength = home_fpl.get("strength_overall_home", 3)
+            away_strength = away_fpl.get("strength_overall_away", 3)
+            
+            model = fit_fpl_team_goals(
+                fixture_id, home_team.fpl_id, away_team.fpl_id, 
+                home_strength, away_strength
             )
             cs = {home_team.fpl_id: model.p_clean_sheet_home, away_team.fpl_id: model.p_clean_sheet_away}
             _process_model_to_rows(model, cs, fixture.fpl_id, home_team, away_team, rates, el, POS, GOAL_PTS, ASSIST_PTS, CS_PTS, APPEARANCE_PTS, rows, games_played)
