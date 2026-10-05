@@ -55,6 +55,9 @@ def consensus(
     MarketProb records.
 
     ``books`` is one row of decimal odds per book, each aligned to ``outcomes``.
+    Each book is de-vigged on its own, then combined per outcome.
+    Because books are combined independently per outcome, they needn't sum
+    to 1 perfectly, so we renormalize back to a proper distribution.
 
     Extreme bookmaker prices are removed with a robust median-absolute-
     deviation rule before the remaining books are averaged equally. Weighting
@@ -65,10 +68,14 @@ def consensus(
         raise ValueError("no books supplied")
     per_book = [devig_proportional(row) for row in _exclude_outlier_books(books)]
     n = len(per_book)
-    avg = [sum(book[i] for book in per_book) / n for i in range(len(outcomes))]
+    centers = [sum(book[i] for book in per_book) / n for i in range(len(outcomes))]
+    total = sum(centers)
+    if total <= 0:
+        raise ValueError("consensus probabilities sum to <= 0")
+    probs = [c / total for c in centers]
     return [
         MarketProb(fixture_id=fixture_id, market=market, outcome=o, prob=p, n_books=n)
-        for o, p in zip(outcomes, avg)
+        for o, p in zip(outcomes, probs)
     ]
 
 

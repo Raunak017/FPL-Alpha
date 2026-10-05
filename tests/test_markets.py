@@ -3,7 +3,11 @@ import math
 
 import pytest
 
-from fpl_alpha.markets import consensus, devig_proportional, implied_prob
+from fpl_alpha.markets import (
+    consensus,
+    devig_proportional,
+    implied_prob,
+)
 
 
 def test_implied_prob():

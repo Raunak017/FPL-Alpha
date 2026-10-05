@@ -39,14 +39,18 @@ _TRANSLITERATION = str.maketrans(
 )
 
 
+
 def teams_from_bootstrap(bootstrap: dict[str, Any]) -> list[Team]:
-    """Normalize bootstrap-static 'teams' into canonical Team records."""
+    """Normalize bootstrap-static 'teams' into canonical Team records, attaching
+    known odds-feed aliases (see ``_EPL_TEAM_ALIASES``) so long club names from
+    betting feeds resolve to the right FPL id."""
     return [
         Team(
             fpl_id=t["id"],
             name=t["name"],
             short_name=t["short_name"],
             aliases=_TEAM_ALIASES.get(_norm(t["name"]), ()),
+
         )
         for t in bootstrap["teams"]
     ]

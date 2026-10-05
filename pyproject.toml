@@ -7,16 +7,16 @@ name = "fpl-alpha"
 version = "0.1.0"
 description = "Market-informed FPL projection and optimization engine"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
     "duckdb>=1.0",
     "pytz",  # DuckDB needs it to read TIMESTAMPTZ cols (captured_at, kickoff_time) into Python
+    "numpy>=1.24",
+    "pandas>=2.0.0",
     # Stdlib-only through step 4 (ingestion, no-vig, team-xG all pure Python).
     # Add deps as later stages need them:
-    #   numpy/scipy  -> Monte Carlo simulation + Dixon–Coles xG upgrade (steps 4, 9)
-    #   pandas       -> projections (step 11)
-    #   pulp/ortools -> optimization (step 12)
     #   rapidfuzz    -> faster/better identity name matching (stdlib difflib for now)
+    "pulp<4.0.0",
 ]
 
 [project.optional-dependencies]

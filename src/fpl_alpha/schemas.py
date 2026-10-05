@@ -32,6 +32,7 @@ class Player:
     aliases: tuple[str, ...] = ()
 
 
+# --- Stage 1 (persistence): timestamped FPL state, history, fixtures --------
 @dataclass(frozen=True)
 class PlayerSnapshot:
     """Time-varying FPL state for one player from bootstrap-static."""
@@ -156,6 +157,141 @@ class Fixture:
     team_h_difficulty: int
 
 
+# --- Stage 2: normalized fixture odds (ingestion -> markets handoff) --------
+@dataclass(frozen=True)
+class FixtureOdds:
+    """One fixture's decimal odds, aligned per book, ready for de-vig/consensus.
+
+    Produced by the odds ingestion parsers (provider-specific JSON in, this
+    normalized shape out) and consumed by ``markets.consensus``. Each row in
+    ``h2h``/``totals`` is one book's decimal prices in a fixed outcome order:
+    ``h2h`` -> [home, draw, away]; ``totals`` -> [over, under] at ``totals_line``.
+    """
+
+    source: str            # e.g. "the-odds-api"
+    event_id: str
+    commence_time: str     # ISO-8601 kickoff (from the feed, not generated)
+    home_team: str         # odds-feed name; resolve to FPL id via identity
+    away_team: str
+    h2h: list[list[float]] = field(default_factory=list)
+    totals: list[list[float]] = field(default_factory=list)
+    totals_line: float | None = None
+
+
+# --- Stage 3: no-vig market probabilities -----------------------------------
+@dataclass(frozen=True)
+class MarketProb:
+    """A single fair (de-vigged, consensus) probability for one outcome."""
+
+    fixture_id: str
+    market: str        # e.g. "h2h", "totals_over_2.5", "btts", "anytime_goal"
+    outcome: str       # e.g. "home", "over", "yes", "<player>"
+    prob: float        # 0..1, margin-removed
+    n_books: int = 1
+
+
+# --- Stage 4: market-implied team goals -------------------------------------
+@dataclass(frozen=True)
+class TeamGoalModel:
+    """Poisson goal expectations for one fixture, derived from match markets."""
+
+    fixture_id: str
+    home_team_fpl_id: int
+    away_team_fpl_id: int
+    lambda_home: float          # expected goals, home
+    lambda_away: float          # expected goals, away
+    p_clean_sheet_home: float
+    p_clean_sheet_away: float
+    score_dist: dict[str, float] = field(default_factory=dict)  # "h-a" -> prob
+
+
+# --- Stage 5-6: player attacking allocation ---------------------------------
+@dataclass(frozen=True)
+class PlayerRates:
+    """Per-player attacking weights used to split a team's xG across its squad.
+
+    Sourced from FPL bootstrap-static — season totals by default (see
+    ``allocation.attack_rates_from_bootstrap``), which fold in playing time
+    without needing a separate minutes model.
+    """
+
+    fpl_id: int
+    team_fpl_id: int
+    xg: float          # expected goals   (share prior)
+    xa: float          # expected assists (share prior)
+    available: float = 1.0  # fitness weight in [0,1] from FPL status/chance-of-playing
+
+
+@dataclass(frozen=True)
+class PlayerFixtureAttack:
+    """One player's market-implied attacking expectation for one fixture.
+
+    ``exp_goals`` / ``exp_assists`` are the ``xG`` / ``xA`` terms of the xPts
+    formula (see docs/XPTS_FORMULA_STATUS.md); ``*_share`` are the fractions of
+    the team total, kept for transparency/debugging.
+    """
+
+    fpl_id: int
+    fixture_id: str
+    team_fpl_id: int
+    exp_goals: float
+    exp_assists: float
+    goal_share: float = 0.0
+    assist_share: float = 0.0
+
+
+# --- Step 8: persisted projection records -----------------------------------
+@dataclass(frozen=True)
+class ProjectionRun:
+    """One immutable execution of a projection model for a target gameweek.
+
+    ``input_fingerprint`` identifies the complete model-and-input state.  A
+    repeated execution with the same fingerprint is a no-op; changed inputs or
+    model code/configuration create a new run so forecasts remain backtestable.
+    Timestamps are supplied by the caller to keep runs reproducible.
+    """
+
+    run_id: str
+    gameweek: int
+    model_name: str
+    model_version: str
+    scoring_rules_version: str
+    input_fingerprint: str
+    as_of: datetime
+    created_at: datetime
+    is_partial: bool = False
+    notes: str | None = None
+
+
+@dataclass(frozen=True)
+class PlayerFixtureProjection:
+    """One player's forecast for one FPL fixture in a projection run.
+
+    Component fields are nullable because the initial partial xPts model does
+    not yet estimate every FPL scoring component.  ``expected_points`` is the
+    total for this fixture, not a gameweek aggregate; doubles are represented by
+    two records and summed by the gameweek view.
+    """
+
+    run_id: str
+    gameweek: int
+    player_fpl_id: int
+    fixture_fpl_id: int
+    expected_points: float
+    expected_goals: float | None = None
+    expected_assists: float | None = None
+    p_start: float | None = None
+    p_60_plus: float | None = None
+    p_clean_sheet: float | None = None
+    appearance_points: float | None = None
+    goal_points: float | None = None
+    assist_points: float | None = None
+    clean_sheet_points: float | None = None
+    save_points: float | None = None
+    defensive_contribution_points: float | None = None
+    bonus_points: float | None = None
+    goals_conceded_points: float | None = None
+    card_points: float | None = None
 # --- Stage 2: provider odds -------------------------------------------------
 @dataclass(frozen=True)
 class OddsProviderEvent:
@@ -211,28 +347,3 @@ class OddsOutcomeSnapshot:
     captured_at: datetime
 
 
-# --- Stage 3: no-vig market probabilities -----------------------------------
-@dataclass(frozen=True)
-class MarketProb:
-    """A single fair (de-vigged, consensus) probability for one outcome."""
-
-    fixture_id: str
-    market: str        # e.g. "h2h", "totals_over_2.5", "btts", "anytime_goal"
-    outcome: str       # e.g. "home", "over", "yes", "<player>"
-    prob: float        # 0..1, margin-removed
-    n_books: int = 1
-
-
-# --- Stage 4: market-implied team goals -------------------------------------
-@dataclass(frozen=True)
-class TeamGoalModel:
-    """Poisson goal expectations for one fixture, derived from match markets."""
-
-    fixture_id: str
-    home_team_fpl_id: int
-    away_team_fpl_id: int
-    lambda_home: float          # expected goals, home
-    lambda_away: float          # expected goals, away
-    p_clean_sheet_home: float
-    p_clean_sheet_away: float
-    score_dist: dict[str, float] = field(default_factory=dict)  # "h-a" -> prob

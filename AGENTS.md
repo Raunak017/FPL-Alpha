@@ -4,6 +4,20 @@ FPL Alpha is a market-informed Fantasy Premier League projection and optimizatio
 
 ## Working Style
 
+1. **Cache-first, always.** Every external request goes through
+   `fpl_alpha.cache.fetch`. Never call `urllib`/`requests` directly from a
+   stage. Never add a polling loop against any API.
+2. **Respect the budgets.** Rate limits live in `config.py` (`ProviderLimits`).
+   Tighten them, never loosen. The Odds API (our only odds source) bills
+   `#markets × #regions` per call against a ~500-credit/mo free tier — request
+   only what you use. `cache.py` tracks the real remaining credits from the
+   API's `x-requests-*` response headers and warns when the budget runs low.
+3. **Secrets only in `.env`** (gitignored). Never hardcode keys; never commit
+   `data/`.
+4. **No speculative abstractions.** Start each new stage as a single module;
+   promote to a package only when it genuinely needs multiple files. Do not
+   pre-create empty folders to match the plan's target tree.
+   
 - Keep replies very short and concise.
 - Prefer implementation over long explanations.
 - Do not explain work in progress; report only after the task is complete.
@@ -34,3 +48,6 @@ At completion, report only:
 
 - What changed
 - Anything still unresolved
+
+## Changelog
+- **ALWAYS** update `CHANGELOG.md` when completing a task or making meaningful code changes. Include a brief summary of what was added, changed, or fixed.

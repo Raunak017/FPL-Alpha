@@ -1,11 +1,21 @@
 """Focused tests for DuckDB schema creation and representative upserts."""
 from dataclasses import replace
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from fpl_alpha.ingestion.fpl import player_history_from_element_summary
-from fpl_alpha.schemas import Fixture, Player, PlayerSnapshot, Team
+from fpl_alpha.schemas import (
+    Fixture,
+    Player,
+    PlayerFixtureProjection,
+    PlayerSnapshot,
+    ProjectionRun,
+    Team,
+)
 from fpl_alpha.storage import (
     open_database,
+    persist_projection_run,
+    select_gameweek_projection_run,
     upsert_fixtures,
     upsert_player_gameweek_history,
     upsert_player_snapshots,
@@ -79,6 +89,9 @@ def test_open_database_initializes_fpl_and_odds_tables(tmp_path):
         "player_snapshots",
         "player_gameweek_history",
         "gameweek_history_ingestions",
+        "projection_runs",
+        "player_fixture_projections",
+        "gameweek_projection_selections",
         "odds_provider_events",
         "odds_event_fixture_mappings",
         "odds_bookmakers",
@@ -240,3 +253,73 @@ def test_history_normalizes_empty_payload_and_upserts_fixture_record(tmp_path):
         connection.close()
 
     assert stored == (1, 13, 0.8)
+
+
+def test_projection_runs_are_immutable_deduplicated_and_selectable(tmp_path):
+    now = datetime(2026, 8, 20, 12, tzinfo=timezone.utc)
+    first_run = ProjectionRun(
+        run_id=str(uuid4()),
+        gameweek=1,
+        model_name="partial_xpts",
+        model_version="0.1.0",
+        scoring_rules_version="2026-27",
+        input_fingerprint="partial-xpts-gw1-input-a",
+        as_of=now,
+        created_at=now,
+        is_partial=True,
+    )
+    first_rows = [
+        PlayerFixtureProjection(
+            run_id=first_run.run_id,
+            gameweek=1,
+            player_fpl_id=10,
+            fixture_fpl_id=99,
+            expected_points=4.2,
+            expected_goals=0.3,
+            p_start=0.8,
+        ),
+        PlayerFixtureProjection(
+            run_id=first_run.run_id,
+            gameweek=1,
+            player_fpl_id=11,
+            fixture_fpl_id=99,
+            expected_points=3.1,
+        ),
+    ]
+    revised_run = replace(
+        first_run,
+        run_id=str(uuid4()),
+        model_version="0.1.1",
+        input_fingerprint="partial-xpts-gw1-input-b",
+    )
+    revised_rows = [
+        replace(row, run_id=revised_run.run_id, expected_points=row.expected_points + 0.5)
+        for row in first_rows
+    ]
+
+    connection = open_database(tmp_path / "fpl_alpha.duckdb")
+    try:
+        assert persist_projection_run(connection, first_run, first_rows) == first_run.run_id
+        assert persist_projection_run(connection, first_run, first_rows) == first_run.run_id
+        assert persist_projection_run(connection, revised_run, revised_rows) == revised_run.run_id
+        select_gameweek_projection_run(
+            connection,
+            1,
+            first_run.run_id,
+            now,
+            selection_reason="last run before deadline",
+        )
+        stored_runs = connection.execute("SELECT count(*) FROM projection_runs").fetchone()[0]
+        stored_rows = connection.execute(
+            "SELECT count(*) FROM player_fixture_projections"
+        ).fetchone()[0]
+        selected = connection.execute(
+            "SELECT player_fpl_id, expected_points "
+            "FROM selected_player_gameweek_projections ORDER BY player_fpl_id"
+        ).fetchall()
+    finally:
+        connection.close()
+
+    assert stored_runs == 2
+    assert stored_rows == 4
+    assert selected == [(10, 4.2), (11, 3.1)]

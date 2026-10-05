@@ -20,8 +20,8 @@ MANIFEST = SNAPSHOTS / "manifest.jsonl"
 
 
 def snapshot_name(provider: str, scope: str, captured_at: str) -> str:
-    """e.g. ('sportsgameodds', 'epl-gw3', '2026-08-21T17:30:00Z') ->
-    'sportsgameodds__epl-gw3__2026-08-21T173000Z.json'."""
+    """e.g. ('the-odds-api', 'epl-gw3', '2026-08-21T17:30:00Z') ->
+    'the-odds-api__epl-gw3__2026-08-21T173000Z.json'."""
     stamp = captured_at.replace(":", "").replace("-", "")
     return f"{provider}__{scope}__{stamp}.json"
 
