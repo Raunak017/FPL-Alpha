@@ -27,7 +27,7 @@ src/fpl_alpha/
   markets.py       de-vig + consensus                     (step 3)
   team_xg.py       market-implied Poisson team goals      (step 4)
   models/          player-level models                    (steps 5+, empty)
-scripts/           refresh_fpl.py · snapshot_odds.py
+scripts/           refresh_fpl.py · refresh_upcoming_propline_odds.py
 tests/             pytest
 data/{raw,processed,snapshots}/   gitignored cache
 ```
@@ -49,7 +49,7 @@ pytest                             # runs the unit tests
 
 ## Developers
 
-- **dev1 — Rushi Pardeshi.** FPL Team ID `432989`. Owns the SportsGameOdds key.
+- **dev1 — Rushi Pardeshi.** FPL Team ID `432989`.
 - **dev2 — TBD.** Add their Team ID to `.env` as `FPL_TEAM_ID_DEV2`.
 
 Working conventions and module ownership live in [`AGENTS.md`](AGENTS.md).
