@@ -6,6 +6,7 @@ snapshots are reproducible.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -23,6 +24,7 @@ from .schemas import (
     PlayerGameweekHistory,
     PlayerSnapshot,
     Team,
+    TeamGoalProjection,
 )
 
 DATABASE_PATH = DATA / "fpl_alpha.duckdb"
@@ -216,6 +218,33 @@ def initialize_schema(connection: duckdb.DuckDBPyConnection) -> None:
                 provider_key, provider_event_id, bookmaker_key, market_key,
                 market_ordinal, outcome_ordinal, captured_at
             )
+        );
+
+        CREATE TABLE IF NOT EXISTS team_goal_model_snapshots (
+            fixture_fpl_id BIGINT NOT NULL,
+            generated_at TIMESTAMPTZ NOT NULL,
+            provider_key VARCHAR NOT NULL,
+            provider_event_ids VARCHAR[] NOT NULL,
+            source_captured_at_min TIMESTAMPTZ NOT NULL,
+            source_captured_at_max TIMESTAMPTZ NOT NULL,
+            source_market_snapshot_count INTEGER NOT NULL,
+            lambda_home DOUBLE NOT NULL,
+            lambda_away DOUBLE NOT NULL,
+            p_clean_sheet_home DOUBLE NOT NULL,
+            p_clean_sheet_away DOUBLE NOT NULL,
+            fit_loss DOUBLE NOT NULL,
+            PRIMARY KEY (fixture_fpl_id, generated_at)
+        );
+
+        CREATE TABLE IF NOT EXISTS team_goal_model_market_comparisons (
+            fixture_fpl_id BIGINT NOT NULL,
+            generated_at TIMESTAMPTZ NOT NULL,
+            market VARCHAR NOT NULL,
+            outcome VARCHAR NOT NULL,
+            market_prob DOUBLE NOT NULL,
+            model_prob DOUBLE NOT NULL,
+            n_books INTEGER NOT NULL,
+            PRIMARY KEY (fixture_fpl_id, generated_at, market, outcome)
         );
 
         ALTER TABLE player_snapshots ADD COLUMN IF NOT EXISTS total_points INTEGER;
@@ -808,6 +837,110 @@ def insert_odds_outcome_snapshots(
                 )
             """,
             rows,
+        )
+
+
+def latest_odds_snapshot_provenance(
+    connection: duckdb.DuckDBPyConnection, fixture_fpl_id: int, provider_key: str = "propline"
+) -> tuple[tuple[str, ...], datetime, datetime, int]:
+    """Return the latest raw market snapshot groups feeding a fixture consensus."""
+    rows = connection.execute(
+        """
+        WITH latest AS (
+            SELECT
+                s.provider_event_id, s.bookmaker_key, s.market_key, s.market_ordinal,
+                max(s.captured_at) AS captured_at
+            FROM odds_outcome_snapshots AS s
+            JOIN odds_event_fixture_mappings AS m
+              ON m.provider_key = s.provider_key
+             AND m.provider_event_id = s.provider_event_id
+            WHERE s.provider_key = ?
+              AND m.fpl_fixture_id = ?
+              AND s.market_key IN (?, ?, ?)
+            GROUP BY ALL
+        )
+        SELECT provider_event_id, CAST(captured_at AS VARCHAR) AS captured_at
+        FROM latest
+        """,
+        [provider_key, fixture_fpl_id, "h2h", "totals", "both_teams_to_score"],
+    ).fetchall()
+    if not rows:
+        raise ValueError(f"no odds snapshot provenance for fixture {fixture_fpl_id}")
+    captured_at = [
+        datetime.fromisoformat(str(row[1]).replace("Z", "+00:00"))
+        for row in rows
+    ]
+    return (
+        tuple(sorted({str(row[0]) for row in rows})),
+        min(captured_at),
+        max(captured_at),
+        len(rows),
+    )
+
+
+def insert_team_goal_projection(
+    connection: duckdb.DuckDBPyConnection, projection: TeamGoalProjection
+) -> None:
+    """Persist one live team-goal model snapshot and its market comparisons."""
+    model = projection.model
+    connection.execute(
+        """
+        INSERT INTO team_goal_model_snapshots (
+            fixture_fpl_id, generated_at, provider_key, provider_event_ids,
+            source_captured_at_min, source_captured_at_max, source_market_snapshot_count,
+            lambda_home, lambda_away, p_clean_sheet_home, p_clean_sheet_away, fit_loss
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (fixture_fpl_id, generated_at) DO UPDATE SET
+            provider_key = excluded.provider_key,
+            provider_event_ids = excluded.provider_event_ids,
+            source_captured_at_min = excluded.source_captured_at_min,
+            source_captured_at_max = excluded.source_captured_at_max,
+            source_market_snapshot_count = excluded.source_market_snapshot_count,
+            lambda_home = excluded.lambda_home,
+            lambda_away = excluded.lambda_away,
+            p_clean_sheet_home = excluded.p_clean_sheet_home,
+            p_clean_sheet_away = excluded.p_clean_sheet_away,
+            fit_loss = excluded.fit_loss
+        """,
+        [
+            projection.fixture_fpl_id,
+            projection.generated_at,
+            projection.provider_key,
+            list(projection.provider_event_ids),
+            projection.source_captured_at_min,
+            projection.source_captured_at_max,
+            projection.source_market_snapshot_count,
+            model.lambda_home,
+            model.lambda_away,
+            model.p_clean_sheet_home,
+            model.p_clean_sheet_away,
+            projection.fit_loss,
+        ],
+    )
+    comparisons = [
+        (
+            projection.fixture_fpl_id,
+            projection.generated_at,
+            comparison.market,
+            comparison.outcome,
+            comparison.market_prob,
+            comparison.model_prob,
+            comparison.n_books,
+        )
+        for comparison in projection.comparisons
+    ]
+    if comparisons:
+        connection.executemany(
+            """
+            INSERT INTO team_goal_model_market_comparisons (
+                fixture_fpl_id, generated_at, market, outcome, market_prob, model_prob, n_books
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (fixture_fpl_id, generated_at, market, outcome) DO UPDATE SET
+                market_prob = excluded.market_prob,
+                model_prob = excluded.model_prob,
+                n_books = excluded.n_books
+            """,
+            comparisons,
         )
 
 

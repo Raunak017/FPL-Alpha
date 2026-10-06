@@ -40,8 +40,6 @@ load_dotenv()
 USER_AGENT = "fpl-alpha/0.1 (+https://github.com/RushiPardeshi)"
 
 # --- Secrets / IDs ----------------------------------------------------------
-SPORTSGAMEODDS_API_KEY = os.environ.get("SPORTSGAMEODDS_API_KEY")
-ODDS_API_KEY = os.environ.get("ODDS_API_KEY")
 PROPLINE_API_KEY = os.environ.get("PROPLINE_API_KEY")
 FPL_TEAM_ID = os.environ.get("FPL_TEAM_ID")
 FPL_TEAM_ID_DEV2 = os.environ.get("FPL_TEAM_ID_DEV2")
@@ -63,30 +61,14 @@ FPL_API = ProviderLimits(
     name="fpl",
     base_url="https://fantasy.premierleague.com/api",
     min_interval_s=1.0,        # be polite; endpoint can soft-ban a hammering IP
-    cache_ttl_s=60 * 60 * 6,   # bootstrap changes ~daily; 6h is plenty in dev
+    cache_ttl_s=60 * 60 * 24,  # bootstrap changes ~daily
     note="public, no key; keep <=1 req/s",
-)
-
-SPORTSGAMEODDS = ProviderLimits(
-    name="sportsgameodds",
-    base_url="https://api.sportsgameodds.com/v2",
-    min_interval_s=6.0,        # <=10 req/min -> >=6s apart
-    cache_ttl_s=60 * 10,       # upstream refreshes ~every 10 min; faster buys nothing
-    note="~2500 objects/mo, 10 req/min; EPL paywalled on free tier",
-)
-
-THE_ODDS_API = ProviderLimits(
-    name="the-odds-api",
-    base_url="https://api.the-odds-api.com/v4",
-    min_interval_s=2.0,
-    cache_ttl_s=60 * 10,
-    note="~500 credits/mo; credits = markets x regions per call",
 )
 
 PROPLINE = ProviderLimits(
     name="propline",
     base_url="https://api.prop-line.com/v1",
     min_interval_s=2.0,
-    cache_ttl_s=60 * 10,
+    cache_ttl_s=60 * 60 * 24,
     note="request only selected EPL events and markets; cache-first",
 )

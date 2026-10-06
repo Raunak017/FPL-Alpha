@@ -1,29 +1,12 @@
-"""Betting-odds clients (Plan step 2).
-
-⚠️ Rate limits are the tightest constraint in this repo (see CLAUDE.md):
-  - SportsGameOdds free tier does NOT include EPL and bills per match-object.
-  - The Odds API bills credits = #markets x #regions per call.
-Both go through cache.fetch (throttled). For scheduled captures, wrap the return
-value with snapshots.write_snapshot so line movement is recoverable.
-
-PropLine EPL ingestion is cache-first and persists normalized outcomes in
-DuckDB; older provider clients remain available for their existing workflows.
-"""
+"""Cache-first PropLine EPL odds ingestion (Plan step 2)."""
 from __future__ import annotations
 
 import urllib.parse
 from datetime import datetime
-from typing import Any
+from typing import Any, Iterable
 
 from ..cache import fetch
-from ..config import (
-    ODDS_API_KEY,
-    PROPLINE,
-    PROPLINE_API_KEY,
-    SPORTSGAMEODDS,
-    SPORTSGAMEODDS_API_KEY,
-    THE_ODDS_API,
-)
+from ..config import PROPLINE, PROPLINE_API_KEY
 from ..identity import match_odds_name_strict, normalize_odds_name
 from ..schemas import (
     Fixture,
@@ -46,41 +29,17 @@ PROPLINE_EPL_MARKETS = (
 PROPLINE_PLAYER_PROP_MARKETS = {"anytime_goal_scorer", "player_assists"}
 # Provider spelling -> (FPL player ID, required FPL team ID). Keep aliases
 # narrow and fixture-scoped; unmatched labels are safer than guessed matches.
-_PROPLINE_PLAYER_ALIASES = {"calvin ramsey": (365, 14)}
-
-
-def sportsgameodds_events(
-    league_id: str = "EPL", limit: int = 10, force: bool = False
-) -> dict[str, Any]:
-    """Fetch events+odds for a league. Raises on the free-tier EPL paywall
-    (HTTP 400 'unavailable at your current subscription tier')."""
-    if not SPORTSGAMEODDS_API_KEY:
-        raise RuntimeError("SPORTSGAMEODDS_API_KEY not set")
-    path = f"/events/?leagueID={league_id}&oddsAvailable=true&limit={limit}"
-    return fetch(
-        SPORTSGAMEODDS,
-        path,
-        key=f"sgo-events-{league_id}-{limit}",
-        headers={"X-Api-Key": SPORTSGAMEODDS_API_KEY},
-        force=force,
-    )
-
-
-def the_odds_api_epl(
-    markets: str = "h2h,totals",
-    regions: str = "uk,eu",
-    force: bool = False,
-) -> list[dict[str, Any]]:
-    """EPL odds from The Odds API. Cost = len(markets) x len(regions) credits —
-    request only what a downstream stage actually consumes."""
-    if not ODDS_API_KEY:
-        raise RuntimeError("ODDS_API_KEY not set")
-    q = urllib.parse.urlencode(
-        {"apiKey": ODDS_API_KEY, "regions": regions, "markets": markets, "oddsFormat": "decimal"}
-    )
-    path = f"/sports/soccer_epl/odds/?{q}"
-    key = f"theoddsapi-epl-{markets.replace(',', '+')}-{regions.replace(',', '+')}"
-    return fetch(THE_ODDS_API, path, key=key, force=force)
+_PROPLINE_PLAYER_ALIASES = {
+    "ben white": (10, 1),
+    "ephron mason clarke": (186, 7),
+    "ferdi kadioglu": (113, 5),
+    "jair": (474, 18),
+    "kaine kessler": (177, 7),
+    "savinho": (403, 19),
+    "yegor yarmolyuk": (102, 4),
+    "yehor yarmolyuk": (102, 4),
+    "calvin ramsey": (365, 14),
+}
 
 
 def propline_epl_events(force: bool = False) -> list[dict[str, Any]]:
@@ -136,6 +95,18 @@ def propline_epl_event_odds_cache_key(event_id: str, markets: tuple[str, ...]) -
     return f"propline-epl-event-{event_id}-{'-'.join(markets)}"
 
 
+def propline_event_from_payload(payload: dict[str, Any]) -> OddsProviderEvent:
+    """Normalize one PropLine event-list or odds-response identity."""
+    return OddsProviderEvent(
+        provider_key="propline",
+        provider_event_id=str(payload["id"]),
+        sport_key=payload["sport_key"],
+        home_team=payload["home_team"],
+        away_team=payload["away_team"],
+        commence_time=payload["commence_time"],
+    )
+
+
 def normalize_propline_event_odds(
     payload: dict[str, Any],
     teams: list[Team],
@@ -150,15 +121,8 @@ def normalize_propline_event_odds(
     list[OddsOutcomeSnapshot],
 ]:
     """Normalize one PropLine event response and map it to an FPL fixture."""
-    event = OddsProviderEvent(
-        provider_key="propline",
-        provider_event_id=str(payload["id"]),
-        sport_key=payload["sport_key"],
-        home_team=payload["home_team"],
-        away_team=payload["away_team"],
-        commence_time=payload["commence_time"],
-    )
-    fixture = _map_propline_event_to_fixture(event, teams, fixtures)
+    event = propline_event_from_payload(payload)
+    fixture = map_propline_event_to_fixture(event, teams, fixtures)
     mapping = OddsEventFixtureMapping(
         provider_key=event.provider_key,
         provider_event_id=event.provider_event_id,
@@ -212,7 +176,7 @@ def normalize_propline_event_odds(
     return event, mapping, list(player_mappings.values()), bookmakers, snapshots
 
 
-def _map_propline_event_to_fixture(
+def map_propline_event_to_fixture(
     event: OddsProviderEvent, teams: list[Team], fixtures: list[Fixture]
 ) -> Fixture | None:
     home_match = match_odds_name_strict(event.home_team, teams)
@@ -232,6 +196,35 @@ def _map_propline_event_to_fixture(
         and _same_time(fixture.kickoff_time, event.commence_time)
     ]
     return matches[0] if len(matches) == 1 else None
+
+
+def mapped_upcoming_propline_events(
+    payloads: Iterable[dict[str, Any]],
+    teams: list[Team],
+    fixtures: list[Fixture],
+    now: datetime,
+    gameweek: int | None = None,
+) -> tuple[list[tuple[OddsProviderEvent, Fixture]], list[OddsProviderEvent], list[OddsProviderEvent]]:
+    """Strictly classify current provider events against upcoming FPL fixtures."""
+    selected: list[tuple[OddsProviderEvent, Fixture]] = []
+    unmapped: list[OddsProviderEvent] = []
+    skipped: list[OddsProviderEvent] = []
+    for payload in payloads:
+        event = propline_event_from_payload(payload)
+        fixture = map_propline_event_to_fixture(event, teams, fixtures)
+        if fixture is None:
+            unmapped.append(event)
+        elif gameweek is not None and fixture.event != gameweek:
+            continue
+        elif (
+            fixture.finished
+            or fixture.kickoff_time is None
+            or _parse_time(fixture.kickoff_time) <= now
+        ):
+            skipped.append(event)
+        else:
+            selected.append((event, fixture))
+    return selected, unmapped, skipped
 
 
 def _map_player_prop(

@@ -223,6 +223,18 @@ class MarketProb:
     n_books: int = 1
 
 
+# --- Market-vs-model comparison ---------------------------------------------
+@dataclass(frozen=True)
+class MarketModelComparison:
+    """One market consensus probability alongside the fitted model value."""
+
+    market: str
+    outcome: str
+    market_prob: float
+    model_prob: float
+    n_books: int
+
+
 # --- Stage 4: market-implied team goals -------------------------------------
 @dataclass(frozen=True)
 class TeamGoalModel:
@@ -236,3 +248,19 @@ class TeamGoalModel:
     p_clean_sheet_home: float
     p_clean_sheet_away: float
     score_dist: dict[str, float] = field(default_factory=dict)  # "h-a" -> prob
+
+
+@dataclass(frozen=True)
+class TeamGoalProjection:
+    """A persisted live team-goal fit and the consensus snapshot it used."""
+
+    fixture_fpl_id: int
+    generated_at: datetime
+    provider_key: str
+    provider_event_ids: tuple[str, ...]
+    source_captured_at_min: datetime
+    source_captured_at_max: datetime
+    source_market_snapshot_count: int
+    model: TeamGoalModel
+    fit_loss: float
+    comparisons: tuple[MarketModelComparison, ...]
