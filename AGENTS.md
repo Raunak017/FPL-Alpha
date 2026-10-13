@@ -28,6 +28,14 @@ FPL Alpha is a market-informed Fantasy Premier League projection and optimizatio
 - Keep credentials and secrets out of the repository; use `.env.example` for configuration documentation.
 - Preserve existing user changes and avoid unrelated edits.
 
+## Changelog
+
+- Before creating a commit, update the root `CHANGELOG.md` with the
+  user-visible features, data/schema changes, and operational command changes
+  included in that commit.
+- Keep entries concise and grouped by commit/date; omit transient debugging and
+  internal refactors with no user-visible effect.
+
 ## Completion Report
 
 At completion, report only:

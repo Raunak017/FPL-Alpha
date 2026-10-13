@@ -19,29 +19,10 @@ per-provider budgets defined in `fpl_alpha.config` (`ProviderLimits`). Never
 call `urllib`/`requests` directly from a stage; never add a call that bypasses
 `cache.py`.
 
-### SportsGameOdds — the tightest constraint, handle with most care
-- **The free tier does NOT include EPL.** Live test returned:
-  `400 "The leagueID EPL is unavailable at your current subscription tier. Upgrade to unlock"`.
-  So on the current key we **cannot pull EPL odds at all** without upgrading.
-- Documented free-tier limits (when a league IS available): ~**2,500 objects/month**,
-  **10 requests/minute**, ~**10-minute** odds refresh. Billing is **per match-object**
-  (one fixture with hundreds of markets = one object), so a full slate of ~10 EPL matches
-  is ~10 objects per snapshot.
-- **Rules for this repo:**
-  - Never exceed **10 req/min** (`SPORTSGAMEODDS.min_interval_s = 6.0` in `config.py`).
-  - Treat the monthly object budget as scarce: at most a **handful of snapshots per gameweek**
-    (e.g. Mon / Wed / Fri / deadline-day), never a live loop.
-  - Odds only refresh every ~10 min upstream, so polling faster buys nothing but burns quota.
-  - Always write the response to `data/` and develop against the cached file.
-- Key lives in `.env` as `SPORTSGAMEODDS_API_KEY` (gitignored). Auth via `X-Api-Key` header
-  **or** `?apiKey=` query param. List valid leagues: `GET /v2/leagues/`.
-
-### The Odds API (fallback for EPL odds)
-- Free tier ≈ **500 credits/month**. **Credits are consumed per request as
-  `#markets × #regions`** — e.g. `markets=h2h,totals` + `regions=uk,eu` = **4 credits/call**.
-  This multiplies fast; request only the markets/regions you actually need.
-- Soccer player props are currently **US-bookmaker only** on this API.
-- Key: `.env` → `ODDS_API_KEY`.
+### PropLine EPL odds
+- PropLine is the sole odds provider. The key is `.env` → `PROPLINE_API_KEY`.
+- Fetch only mapped upcoming fixtures and the selected markets; rely on the 24-hour
+  raw-cache TTL for repeat runs unless `--force` is explicitly needed.
 
 ### Official FPL API (no key, but still be polite)
 - Not formally documented; no published rate limit, but the endpoint **can soft-ban an IP**
@@ -52,7 +33,6 @@ call `urllib`/`requests` directly from a stage; never add a call that bypasses
 ## Developers (2)
 
 - **dev1 — Rushi Pardeshi.** FPL Team ID `432989` (team name "KanteGetAnyWorse", USA).
-  Owns the current SportsGameOdds key.
 - **dev2 — TBD.** Add their FPL Team ID to `.env` as `FPL_TEAM_ID_DEV2` when known.
 
 ## Data layers & access
@@ -64,7 +44,7 @@ call `urllib`/`requests` directly from a stage; never add a call that bypasses
 | Manager squad/history | `/api/entry/{id}/`, `/history/`, `/event/{gw}/picks/` | none (public by Team ID) | ✅ (picks public only after a GW locks) |
 | Football xG stats | FPL bootstrap (primary); FBref (secondary) | none | ✅ FPL / ⚠️ FBref scrape with care |
 | Understat xG | understat.com | none | ⛔ anti-bot gated now |
-| Betting odds | SportsGameOdds / The Odds API | **API key** | 🔑 SGO EPL paywalled; Odds API key not set |
+| Betting odds | PropLine | `PROPLINE_API_KEY` | ✅ cache-first EPL ingestion |
 
 ## Layout
 
@@ -87,7 +67,7 @@ FPL-Alpha/
 │   ├── team_xg.py            # market-implied Poisson team goals       (step 4)
 │   └── models/               # player-level models                    (steps 5+, empty)
 │
-├── scripts/                  # refresh_fpl.py · snapshot_odds.py
+├── scripts/                  # refresh_fpl.py · refresh_propline_odds.py
 ├── tests/                    # pytest (no-vig math covered)
 ├── notebooks/
 ├── docs/                     # PROJECT_PLAN.md (the 12-step roadmap)
@@ -106,13 +86,12 @@ pip install -e ".[dev]"
 cp .env.example .env          # add keys / team ids as available
 
 python scripts/refresh_fpl.py         # cache FPL bootstrap + fixtures (cache-first)
-python scripts/snapshot_odds.py --provider the-odds-api \
-    --scope epl-gw1 --captured-at 2026-08-21T17:30:00Z   # scheduled odds snapshot
+python scripts/refresh_upcoming_propline_odds.py  # mapped upcoming EPL odds
 pytest                                 # runs the no-vig math tests
 ```
 
 `refresh_fpl.py` does nothing over the wire if the cache is still fresh; pass
-`--force` to bypass the TTL. Run odds snapshots on a schedule, never in a loop.
+`--force` to bypass the TTL. PropLine refreshes are cache-first; never poll in a loop.
 
 ## Conventions
 

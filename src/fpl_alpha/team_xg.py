@@ -13,11 +13,24 @@ correction is the natural next upgrade (see TODO).
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import math
 import re
 from collections.abc import Iterable
+from typing import Any
 
-from .schemas import MarketProb, TeamGoalModel
+from .markets import consensus_from_latest_odds
+from .schemas import (
+    MarketModelComparison,
+    MarketProb,
+    TeamGoalModel,
+    TeamGoalProjection,
+)
+from .storage import (
+    insert_team_goal_projection,
+    latest_odds_snapshot_provenance,
+    load_fixtures,
+)
 
 # Goal ceiling for integrating the Poisson grid. P(goals > 10) is negligible
 # for any realistic team lambda (<0.1% at lambda=3), so truncation is safe.
@@ -171,3 +184,108 @@ def fit_team_goals(
         p_clean_sheet_away=poisson_pmf(0, lh),
         score_dist=score_matrix(lh, la),
     )
+
+def team_goal_fit_loss(model: TeamGoalModel, market_probs: Iterable[MarketProb]) -> float:
+    """Return the fitted sum-of-squared market-probability error."""
+    targets, total_line = _build_targets(market_probs)
+    return _loss(model.lambda_home, model.lambda_away, targets, total_line)
+
+
+def model_market_comparisons(
+    model: TeamGoalModel, market_probs: Iterable[MarketProb]
+) -> tuple[MarketModelComparison, ...]:
+    """Pair supported fair market probabilities with their model equivalents."""
+    probabilities = list(market_probs)
+    _, total_line = _build_targets(probabilities)
+    implied = model_probs(model.lambda_home, model.lambda_away, total_line)
+    comparisons: list[MarketModelComparison] = []
+    for probability in probabilities:
+        market, outcome = probability.market.lower(), probability.outcome.lower()
+        if market == "h2h" and outcome in {"home", "draw", "away"}:
+            model_prob = implied[outcome]
+        elif market == "btts" and outcome in {"yes", "no"}:
+            model_prob = implied[f"btts_{outcome}"]
+        elif market.startswith("totals_") and outcome in {"over", "under"}:
+            model_prob = implied[outcome]
+        else:
+            continue
+        comparisons.append(
+            MarketModelComparison(
+                market=probability.market,
+                outcome=probability.outcome,
+                market_prob=probability.prob,
+                model_prob=model_prob,
+                n_books=probability.n_books,
+            )
+        )
+    return tuple(comparisons)
+
+
+def upcoming_fixture_ids_with_odds(
+    connection: Any,
+    provider_key: str = "propline",
+    now: datetime | None = None,
+) -> list[int]:
+    """Return future FPL fixtures with at least one mapped provider outcome."""
+    current_time = now or datetime.now(timezone.utc)
+    rows = connection.execute(
+        """
+        SELECT DISTINCT mapping.fpl_fixture_id
+        FROM odds_event_fixture_mappings AS mapping
+        JOIN odds_outcome_snapshots AS snapshot
+          ON snapshot.provider_key = mapping.provider_key
+         AND snapshot.provider_event_id = mapping.provider_event_id
+        JOIN fixtures AS fixture
+          ON fixture.fpl_id = mapping.fpl_fixture_id
+        WHERE mapping.provider_key = ?
+          AND fixture.finished = FALSE
+          AND fixture.kickoff_time IS NOT NULL
+          AND fixture.kickoff_time > ?
+        ORDER BY mapping.fpl_fixture_id
+        """,
+        [provider_key, current_time],
+    ).fetchall()
+    return [fixture_fpl_id for (fixture_fpl_id,) in rows]
+
+
+def build_and_persist_team_goal_projection(
+    connection: Any,
+    fixture_fpl_id: int,
+    provider_key: str = "propline",
+    generated_at: datetime | None = None,
+) -> TeamGoalProjection:
+    """Fit and persist one live team-goal projection from DuckDB consensus."""
+    market_probs = consensus_from_latest_odds(connection, fixture_fpl_id, provider_key)
+    if not market_probs:
+        raise ValueError(f"no complete match-market consensus for fixture {fixture_fpl_id}")
+
+    fixture = next(
+        (item for item in load_fixtures(connection) if item.fpl_id == fixture_fpl_id),
+        None,
+    )
+    if fixture is None:
+        raise ValueError(f"unknown FPL fixture {fixture_fpl_id}")
+
+    model = fit_team_goals(
+        str(fixture_fpl_id),
+        fixture.team_h_fpl_id,
+        fixture.team_a_fpl_id,
+        market_probs,
+    )
+    event_ids, captured_min, captured_max, snapshot_count = latest_odds_snapshot_provenance(
+        connection, fixture_fpl_id, provider_key
+    )
+    projection = TeamGoalProjection(
+        fixture_fpl_id=fixture_fpl_id,
+        generated_at=generated_at or datetime.now(timezone.utc),
+        provider_key=provider_key,
+        provider_event_ids=event_ids,
+        source_captured_at_min=captured_min,
+        source_captured_at_max=captured_max,
+        source_market_snapshot_count=snapshot_count,
+        model=model,
+        fit_loss=team_goal_fit_loss(model, market_probs),
+        comparisons=model_market_comparisons(model, market_probs),
+    )
+    insert_team_goal_projection(connection, projection)
+    return projection
