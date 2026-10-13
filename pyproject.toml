@@ -7,7 +7,7 @@ name = "fpl-alpha"
 version = "0.1.0"
 description = "Market-informed FPL projection and optimization engine"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.11"
 dependencies = [
     "duckdb>=1.0",
     "pytz",  # DuckDB needs it to read TIMESTAMPTZ cols (captured_at, kickoff_time) into Python

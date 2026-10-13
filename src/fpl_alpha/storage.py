@@ -6,6 +6,7 @@ snapshots are reproducible.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
@@ -15,6 +16,7 @@ import duckdb
 from .config import DATA
 from .schemas import (
     Fixture,
+    FixtureTeamXG,
     OddsBookmaker,
     OddsEventFixtureMapping,
     OddsOutcomeSnapshot,
@@ -265,7 +267,20 @@ def initialize_schema(connection: duckdb.DuckDBPyConnection) -> None:
                 provider_key, provider_event_id, bookmaker_key, market_key,
                 market_ordinal, outcome_ordinal, captured_at
             )
+        );
 
+        CREATE TABLE IF NOT EXISTS fixture_team_xg (
+            fixture_fpl_id BIGINT NOT NULL,
+            provider_key VARCHAR NOT NULL,
+            captured_at TIMESTAMPTZ NOT NULL,
+            lambda_home DOUBLE NOT NULL,
+            lambda_away DOUBLE NOT NULL,
+            p_clean_sheet_home DOUBLE NOT NULL,
+            p_clean_sheet_away DOUBLE NOT NULL,
+            fit_loss DOUBLE NOT NULL,
+            residuals VARCHAR NOT NULL,
+            market_provenance VARCHAR NOT NULL,
+            PRIMARY KEY (fixture_fpl_id, provider_key, captured_at)
         );
 
         ALTER TABLE player_snapshots ADD COLUMN IF NOT EXISTS total_points INTEGER;
@@ -1002,4 +1017,128 @@ def _timestamp_as_iso(value: object) -> str | None:
             return value.removesuffix("+00") + "Z"
         return value
     return value.isoformat().replace("+00:00", "Z")
+
+
+def insert_fixture_team_xg(
+    connection: duckdb.DuckDBPyConnection,
+    records: Iterable[FixtureTeamXG],
+) -> None:
+    """Persist fitted team xG records with market provenance and fit residuals."""
+    data = [
+        (
+            record.fixture_fpl_id,
+            record.provider_key,
+            record.captured_at,
+            record.lambda_home,
+            record.lambda_away,
+            record.p_clean_sheet_home,
+            record.p_clean_sheet_away,
+            record.fit_loss,
+            json.dumps(record.residuals, sort_keys=True),
+            json.dumps(record.market_provenance, sort_keys=True),
+        )
+        for record in records
+    ]
+    if not data:
+        return
+    connection.executemany(
+        """
+        INSERT INTO fixture_team_xg (
+            fixture_fpl_id, provider_key, captured_at, lambda_home, lambda_away,
+            p_clean_sheet_home, p_clean_sheet_away, fit_loss, residuals, market_provenance
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (fixture_fpl_id, provider_key, captured_at) DO UPDATE SET
+            lambda_home = excluded.lambda_home,
+            lambda_away = excluded.lambda_away,
+            p_clean_sheet_home = excluded.p_clean_sheet_home,
+            p_clean_sheet_away = excluded.p_clean_sheet_away,
+            fit_loss = excluded.fit_loss,
+            residuals = excluded.residuals,
+            market_provenance = excluded.market_provenance
+        """,
+        data,
+    )
+
+
+def load_latest_fixture_team_xg(
+    connection: duckdb.DuckDBPyConnection,
+    fixture_fpl_id: int,
+    provider_key: str = "propline",
+) -> FixtureTeamXG | None:
+    """Load the latest fitted team xG for a fixture."""
+    row = connection.execute(
+        """
+        SELECT
+            fixture_fpl_id, provider_key, captured_at, lambda_home, lambda_away,
+            p_clean_sheet_home, p_clean_sheet_away, fit_loss, residuals, market_provenance
+        FROM fixture_team_xg
+        WHERE fixture_fpl_id = ? AND provider_key = ?
+        ORDER BY captured_at DESC
+        LIMIT 1
+        """,
+        [fixture_fpl_id, provider_key],
+    ).fetchone()
+    if row is None:
+        return None
+    (
+        f_id,
+        p_key,
+        c_at,
+        lh,
+        la,
+        pcs_h,
+        pcs_a,
+        loss,
+        res_str,
+        prov_str,
+    ) = row
+    return FixtureTeamXG(
+        fixture_fpl_id=f_id,
+        provider_key=p_key,
+        captured_at=c_at,
+        lambda_home=lh,
+        lambda_away=la,
+        p_clean_sheet_home=pcs_h,
+        p_clean_sheet_away=pcs_a,
+        fit_loss=loss,
+        residuals=json.loads(res_str) if isinstance(res_str, str) else res_str,
+        market_provenance=json.loads(prov_str) if isinstance(prov_str, str) else prov_str,
+    )
+
+
+def load_fixture_team_xg(
+    connection: duckdb.DuckDBPyConnection,
+    fixture_fpl_id: int | None = None,
+    provider_key: str = "propline",
+) -> list[FixtureTeamXG]:
+    """Load fitted team xG records, optionally filtered by fixture."""
+    query = """
+        SELECT
+            fixture_fpl_id, provider_key, captured_at, lambda_home, lambda_away,
+            p_clean_sheet_home, p_clean_sheet_away, fit_loss, residuals, market_provenance
+        FROM fixture_team_xg
+        WHERE provider_key = ?
+    """
+    params: list[object] = [provider_key]
+    if fixture_fpl_id is not None:
+        query += " AND fixture_fpl_id = ?"
+        params.append(fixture_fpl_id)
+    query += " ORDER BY fixture_fpl_id, captured_at DESC"
+    rows = connection.execute(query, params).fetchall()
+    return [
+        FixtureTeamXG(
+            fixture_fpl_id=f_id,
+            provider_key=p_key,
+            captured_at=c_at,
+            lambda_home=lh,
+            lambda_away=la,
+            p_clean_sheet_home=pcs_h,
+            p_clean_sheet_away=pcs_a,
+            fit_loss=loss,
+            residuals=json.loads(res_str) if isinstance(res_str, str) else res_str,
+            market_provenance=json.loads(prov_str) if isinstance(prov_str, str) else prov_str,
+        )
+        for f_id, p_key, c_at, lh, la, pcs_h, pcs_a, loss, res_str, prov_str in rows
+    ]
 

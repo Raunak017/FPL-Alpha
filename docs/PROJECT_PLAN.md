@@ -104,21 +104,21 @@ Integrate an odds provider and collect:
 
 ✅ Raw PropLine event responses remain cache-first under `data/raw/propline/`.
 
-✅ Raw PropLine event responses remain cache-first under `data/raw/propline/`.
-
 ✅ Normalized DuckDB persistence for provider events, FPL fixture mappings,
 bookmakers, append-only outcome snapshots, and auditable player mappings.
 
 *PropLine is implemented in `src/fpl_alpha/ingestion/odds.py` and captured
 cache-first with `scripts/refresh_propline_odds.py`. Events map to FPL fixtures
 by home team, away team, and kickoff; player props are fixture-team-scoped and
-use explicit aliases or strict normalization, leaving unresolved labels `NULL`.*
+use explicit aliases or strict normalization, leaving unresolved labels `NULL`.
+The Odds API is maintained as a secondary/fallback source.*
 
 ### 3. No-Vig Market Probabilities — ✅ done
 Convert bookmaker odds into fair probabilities by:
 
 - ✅ Removing bookmaker margin — `markets.devig_proportional` (proportional method)
 - ✅ Combining multiple bookmakers — `markets.consensus`
+- ✅ Reading latest complete DuckDB bookmaker snapshots — `markets.consensus_from_latest_odds`
 - ✅ Handling outliers — robust median-absolute-deviation rule before equal-weight averaging
 
 *The current bridge supports h2h, BTTS, and the match-total line nearest 2.5;
@@ -132,10 +132,12 @@ Use match markets to estimate:
 - ✅ Away expected goals
 - ✅ Clean-sheet probabilities
 - ✅ Score distributions
+- ✅ Persistence with market provenance and fit residuals — `fixture_team_xg` in DuckDB
 
 ✅ Poisson-based baseline model (independent Poisson; fit by coordinate descent + golden-section, pure stdlib).
+✅ Step 4 operational flow: DuckDB consensus → `fit_team_goals()` → persisted team-xG (`fixture_team_xg`) with market provenance & fit residuals (`scripts/fit_team_xg.py` / `team_xg.fit_and_persist_fixture_team_xg`).
 
-*Implemented in `src/fpl_alpha/team_xg.py`; tested in `tests/test_team_xg.py`; end-to-end demo `scripts/demo_market_to_xg.py`. Planned refinement (not blocking): Dixon–Coles low-score correction.*
+*Implemented in `src/fpl_alpha/team_xg.py`; tested in `tests/test_team_xg.py`. Planned refinement (not blocking): Dixon–Coles low-score correction.*
 
 ### 5. Player Goal Probabilities — 🟡 partial [remaining: calibrate priors; emit goal-prob field; player-prop source]
 Use team xG and per-player shares to estimate:

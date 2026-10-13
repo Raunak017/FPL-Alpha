@@ -9,7 +9,7 @@ import json
 from datetime import datetime, timezone
 
 from fpl_alpha.config import RAW
-from fpl_alpha.identity import teams_from_bootstrap
+from fpl_alpha.identity import teams_from_bootstrap, player_snapshots_from_bootstrap
 from fpl_alpha.ingestion import fpl
 from fpl_alpha.allocation import attack_weights_from_bootstrap, allocate_fixture
 from fpl_alpha.team_xg import fit_fpl_team_goals
@@ -43,6 +43,8 @@ def main():
     el = {e["id"]: e for e in boot["elements"]}
     POS = {1: "GKP", 2: "DEF", 3: "MID", 4: "FWD"}
     
+    now_utc = datetime.now(timezone.utc)
+    snapshots = {s.player_fpl_id: s for s in player_snapshots_from_bootstrap(boot, now_utc)}
     results = []
     
     for fixture in gameweek_fixtures:
@@ -81,28 +83,8 @@ def main():
                 fpl_id=r.fpl_id, web_name=e["web_name"], full_name="", 
                 team_fpl_id=r.team_fpl_id, position=pos, now_cost=e["now_cost"]
             )
-            # Correctly map defensive/save stats needed for projections
-            dummy_snapshot = PlayerSnapshot(
-                player_fpl_id=r.fpl_id, captured_at=datetime.now(timezone.utc), now_cost=e["now_cost"], 
-                selected_by_percent=0.0, status=e.get("status", "a"), total_points=0, points_per_game=0.0, 
-                form=form, minutes=int(_f(e.get("minutes"))), starts=int(_f(e.get("starts"))), goals_scored=0, assists=0,
-                clean_sheets=0, bonus=0, bps=0, expected_goals=0.0, expected_assists=0.0, 
-                expected_goal_involvements=0.0, expected_goals_conceded=0.0, 
-                clean_sheets_per_90=_f(e.get("clean_sheets_per_90")), 
-                defensive_contribution_per_90=_f(e.get("expected_goals_conceded_per_90")), # FPL doesn't have def_contrib natively, usually map to xgc or 0
-                expected_goals_per_90=_f(e.get("expected_goals_per_90")), 
-                expected_assists_per_90=_f(e.get("expected_assists_per_90")), 
-                expected_goal_involvements_per_90=_f(e.get("expected_goal_involvements_per_90")), 
-                expected_goals_conceded_per_90=_f(e.get("expected_goals_conceded_per_90")), 
-                goals_conceded_per_90=_f(e.get("goals_conceded_per_90")), 
-                saves_per_90=_f(e.get("saves_per_90")), 
-                starts_per_90=_f(e.get("starts_per_90")), 
-                influence=0.0, creativity=0.0, threat=0.0, ict_index=0.0,
-                chance_of_playing_next_round=e.get("chance_of_playing_next_round"), chance_of_playing_this_round=None, 
-                transfers_in_event=0, transfers_out_event=0, transfers_in=0, transfers_out=0
-            )
-            
-            proj = project_player_fixture(dummy_player, dummy_snapshot, r, cs[r.team_fpl_id], games_played=games_played)
+            snapshot = snapshots[r.fpl_id]
+            proj = project_player_fixture(dummy_player, snapshot, r, cs[r.team_fpl_id], games_played=games_played)
             
             if proj.expected_points > 0:
                 results.append({
@@ -115,7 +97,7 @@ def main():
                     "xpts": proj.expected_points,
                     "xg": r.exp_goals,
                     "xa": r.exp_assists,
-                    "mins": int(dummy_snapshot.minutes),
+                    "mins": int(snapshot.minutes),
                     "saves_90": _f(e.get("saves_per_90"))
                 })
                 

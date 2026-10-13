@@ -40,11 +40,15 @@ Downstream stages (`simulation`, `scoring`, `projections`, `optimization`,
 
 | Script | What it does |
 |--------|---------------|
-| `refresh_fpl.py` | Refreshes the cached FPL core data (bootstrap + fixtures) and upserts teams/players/fixtures/snapshots/gameweek history into the local DB. Cache-first — does nothing over the wire if the cache is still fresh; pass `--force` to bypass the TTL. |
-| `snapshot_odds.py --scope <name> --captured-at <iso8601>` | Captures a timestamped odds snapshot from The Odds API and writes it under `data/raw/snapshots/`. Run on a schedule (Mon/Wed/Fri/deadline-day), never in a loop — prints the credit cost (`#markets x #regions`) and the remaining budget after the call. |
-| `demo_market_to_xg.py` | Fully offline demo of steps 3→4 (de-vig + consensus → Poisson team xG) using hardcoded example odds for one fixture — no odds API key needed. |
-| `demo_epl_market_to_xg.py [--live]` | Same steps 2→4 chain but on the real EPL slate: parses the cached (or, with `--live`, freshly fetched) The Odds API snapshot, identity-matches team names to FPL ids, and prints team xG / clean-sheet probabilities / top attacking threats per fixture. Offline by default (0 credits); `--live` spends `#markets x #regions` credits. |
-| `compare_ep_next.py` | Offline sanity check: runs the full cached pipeline (odds → team λ → availability-gated allocation) to compute a **partial** xPts per player and compares it against FPL's own `ep_next`, printing top-20 tables, a per-position mean breakdown, and Pearson/Spearman correlations. Deliberately missing bonus, defensive contribution, saves, and goals-conceded penalty — read as a directional/rank check, not a precision benchmark. |
+| `refresh_fpl.py` | Refreshes cached FPL core data (bootstrap + fixtures) and upserts teams/players/fixtures/snapshots into DuckDB. Cache-first. |
+| `refresh_propline_odds.py --event-id <id>` | Primary odds ingest: captures PropLine event odds cache-first into DuckDB (`odds_outcome_snapshots`, `odds_event_fixture_mappings`). |
+| `build_market_consensus.py --fixture-id <id> [--fit]` | Primary market consensus: derives fair no-vig probabilities from DuckDB snapshots (`consensus_from_latest_odds`). Pass `--fit` to fit and persist team xG to DuckDB. |
+| `fit_team_xg.py [--fixture-id <id>]` | Step 4 pipeline: DuckDB consensus → fit Poisson team goals → persisted in DuckDB (`fixture_team_xg`) with market provenance and fit residuals. |
+| `optimize_team.py` | Solves the MILP wildcard optimization maximizing starting XI + captain expected points under budget and formation constraints. |
+| `explore_xpts.py` | Interactive terminal explorer to filter and inspect expected points across teams, positions, and prices. |
+| `snapshot_odds.py --scope <name>` | Fallback/secondary odds ingest: captures scheduled odds snapshot from The Odds API into `data/snapshots/`. |
+| `demo_epl_market_to_xg.py` | Secondary/fallback demo: runs market-to-xG directly from cached The Odds API JSON payloads. |
+| `compare_ep_next.py` | Directional validation: compares model projections against official FPL `ep_next` predictions. |
 
 ## Quickstart
 

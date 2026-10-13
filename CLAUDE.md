@@ -19,34 +19,26 @@ per-provider budgets defined in `fpl_alpha.config` (`ProviderLimits`). Never
 call `urllib`/`requests` directly from a stage; never add a call that bypasses
 `cache.py`.
 
-### The Odds API — our one EPL odds source, the tightest constraint
-This is the **only** odds provider now (SportsGameOdds was dropped — its free
-tier paywalls EPL). Handle its budget with the most care.
+### Odds Architecture: PropLine (Primary) → DuckDB → Consensus
+The primary operational odds pipeline is:
+1. Ingest PropLine odds cache-first via `scripts/refresh_propline_odds.py`.
+2. Persist normalized records to DuckDB (`odds_outcome_snapshots`, `odds_event_fixture_mappings`, etc.).
+3. Form robust consensus probabilities via `markets.consensus_from_latest_odds()`.
+4. Fit Poisson team goals via `team_xg.fit_and_persist_fixture_team_xg()` into DuckDB (`fixture_team_xg`).
+
+### The Odds API — Secondary / Fallback Source
+The Odds API (`the_odds_api_epl`, `scripts/snapshot_odds.py`) is maintained as a secondary/fallback source. Handle its budget with care:
 - Free tier ≈ **500 credits/month**. **Credits are consumed per request as
   `#markets × #regions`** — e.g. `markets=h2h,totals` + `regions=uk,eu` = **4 credits/call**
-  (historical requests cost **×10**). This multiplies fast; request only the
-  markets/regions a downstream stage actually consumes.
+  (historical requests cost **×10**). Request only what you use.
 - **The API reports your budget back to you.** Every live response carries
   `x-requests-remaining`, `x-requests-used`, and `x-requests-last` (cost of that
   call). `cache.py` records these to `data/raw/the-odds-api/_usage.json` and logs
   a warning once remaining dips below `THE_ODDS_API.low_budget_threshold` (50).
-  Read the running total with `cache.read_usage("the-odds-api")`; treat that
-  count as authoritative, not any counter we keep ourselves.
+  Read the running total with `cache.read_usage("the-odds-api")`.
 - **Rules for this repo:**
-  - Throttle is `THE_ODDS_API.min_interval_s = 2.0` and the cache TTL is 10 min
-    in `config.py` — tighten, never loosen.
-  - At most a **handful of snapshots per gameweek** (e.g. Mon / Wed / Fri /
-    deadline-day), never a live loop. Always develop against the cached file.
-- **Player props (feasible, not yet built).** Per-player markets exist for EPL
-  but only via the *event-specific* endpoint, one fixture at a time, and only
-  from **US bookmakers** (`regions=us`):
-  `GET /v4/sports/soccer_epl/events/{eventId}/odds?regions=us&markets=player_goal_scorer_anytime,...`.
-  Get the `{eventId}`s from `GET /v4/sports/soccer_epl/events` first — that list
-  call is **free** (no credits) — then spend `#markets × #regions` **per event**
-  (anytime-goalscorer over a 10-match slate ≈ 10 credits/snapshot). Available
-  keys: `player_goal_scorer_anytime`/`_first`/`_last`, `player_assists`,
-  `player_shots`, `player_shots_on_target`, `player_to_receive_card`/`_red_card`.
-  See the header comment in `ingestion/odds.py`; wire up alongside Plan step 5.
+  - Throttle is `THE_ODDS_API.min_interval_s = 2.0` and cache TTL is 10 min in `config.py`.
+  - Capture snapshots on a schedule, never in a loop. Always develop against cached files.
 - Key: `.env` → `ODDS_API_KEY`.
 
 ### Consolidating many bookmakers into one number
@@ -86,8 +78,8 @@ markets like player props quoted by only 2–3 US books.
 | Manager squad/history | `/api/entry/{id}/`, `/history/`, `/event/{gw}/picks/` | none (public by Team ID) | ✅ (picks public only after a GW locks) |
 | Football xG stats | FPL bootstrap (primary); FBref (secondary) | none | ✅ FPL / ⚠️ FBref scrape with care |
 | Understat xG | understat.com | none | ⛔ anti-bot gated now |
-| Betting odds (EPL match) | The Odds API (`soccer_epl`, featured `/odds`) | **API key** (`ODDS_API_KEY`) | ✅ working — decimal odds; live EPL source (verified 2026-08-21) |
-| Betting odds (EPL player props) | The Odds API (event `/events/{id}/odds`, `regions=us`) | **API key** (`ODDS_API_KEY`) | 🟡 feasible, not built — US books only, per-event credit cost (see odds.py) |
+| Betting odds (Primary: match & props) | PropLine (via `refresh_propline_odds.py` → DuckDB) | none / cached | ✅ working — match & props in DuckDB |
+| Betting odds (Secondary / fallback) | The Odds API (`soccer_epl`, featured `/odds`) | **API key** (`ODDS_API_KEY`) | ✅ working — secondary/fallback feed |
 
 Downstream stages (`simulation`, `scoring`, `projections`, `optimization`,
 `evaluation`) are added when reached — the plan reserves the names, but empty

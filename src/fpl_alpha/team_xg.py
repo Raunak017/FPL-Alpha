@@ -16,8 +16,10 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Iterable
+from datetime import datetime, timezone
+from typing import Any
 
-from .schemas import MarketProb, TeamGoalModel
+from .schemas import FixtureTeamXG, MarketProb, TeamGoalModel
 
 # Goal ceiling for integrating the Poisson grid. P(goals > 10) is negligible
 # for any realistic team lambda (<0.1% at lambda=3), so truncation is safe.
@@ -160,6 +162,16 @@ def fit_team_goals(
         if abs(lh - prev_lh) + abs(la - prev_la) < 1e-6:
             break
 
+    model = model_probs(lh, la, total_line)
+    residuals = {k: model[k] - targets[k] for k in targets if k in model}
+    fit_loss = sum(r**2 for r in residuals.values())
+    market_provenance = {
+        "markets": sorted(set(mp.market for mp in market_probs)),
+        "n_books": max((mp.n_books for mp in market_probs), default=0),
+        "total_line": total_line,
+        "targets": targets,
+    }
+
     return TeamGoalModel(
         fixture_id=fixture_id,
         home_team_fpl_id=home_team_fpl_id,
@@ -170,7 +182,85 @@ def fit_team_goals(
         p_clean_sheet_home=poisson_pmf(0, la),
         p_clean_sheet_away=poisson_pmf(0, lh),
         score_dist=score_matrix(lh, la),
+        fit_loss=fit_loss,
+        residuals=residuals,
+        market_provenance=market_provenance,
     )
+
+
+def fit_fixture_from_duckdb(
+    connection: Any,
+    fixture_fpl_id: int,
+    provider_key: str = "propline",
+    captured_at: datetime | None = None,
+) -> FixtureTeamXG:
+    """Step 4: DuckDB consensus -> fit_team_goals() -> FixtureTeamXG.
+
+    Builds fair probabilities from the latest complete match-market odds in DuckDB,
+    fits Poisson goal rates, and returns a FixtureTeamXG record with market
+    provenance and fit residuals.
+    """
+    from .markets import consensus_from_latest_odds
+
+    market_probs = consensus_from_latest_odds(
+        connection, fixture_fpl_id, provider_key=provider_key
+    )
+    if not market_probs:
+        raise ValueError(
+            f"No usable complete market odds found in DuckDB for fixture {fixture_fpl_id} (provider={provider_key})"
+        )
+
+    row = connection.execute(
+        "SELECT team_h_fpl_id, team_a_fpl_id FROM fixtures WHERE fpl_id = ?",
+        [fixture_fpl_id],
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"Fixture {fixture_fpl_id} not found in fixtures table")
+    home_id, away_id = row
+
+    if captured_at is None:
+        c_row = connection.execute(
+            """
+            SELECT max(s.captured_at)
+            FROM odds_outcome_snapshots AS s
+            JOIN odds_event_fixture_mappings AS m
+              ON m.provider_key = s.provider_key
+             AND m.provider_event_id = s.provider_event_id
+            WHERE s.provider_key = ? AND m.fpl_fixture_id = ?
+            """,
+            [provider_key, fixture_fpl_id],
+        ).fetchone()
+        captured_at = c_row[0] if (c_row and c_row[0] is not None) else datetime.now(timezone.utc)
+
+    model = fit_team_goals(str(fixture_fpl_id), home_id, away_id, market_probs)
+    return FixtureTeamXG(
+        fixture_fpl_id=fixture_fpl_id,
+        provider_key=provider_key,
+        captured_at=captured_at,
+        lambda_home=model.lambda_home,
+        lambda_away=model.lambda_away,
+        p_clean_sheet_home=model.p_clean_sheet_home,
+        p_clean_sheet_away=model.p_clean_sheet_away,
+        fit_loss=model.fit_loss,
+        residuals=model.residuals,
+        market_provenance=model.market_provenance,
+    )
+
+
+def fit_and_persist_fixture_team_xg(
+    connection: Any,
+    fixture_fpl_id: int,
+    provider_key: str = "propline",
+    captured_at: datetime | None = None,
+) -> FixtureTeamXG:
+    """Step 4: DuckDB consensus -> fit_team_goals() -> persisted team-xG in DuckDB."""
+    from .storage import insert_fixture_team_xg
+
+    record = fit_fixture_from_duckdb(
+        connection, fixture_fpl_id, provider_key=provider_key, captured_at=captured_at
+    )
+    insert_fixture_team_xg(connection, [record])
+    return record
 
 
 def fit_fpl_team_goals(

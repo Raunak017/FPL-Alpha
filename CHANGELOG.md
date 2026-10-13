@@ -5,10 +5,17 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **PlayerSnapshot Field Completeness & Defcon Mapping**: Fixed `scripts/optimize_team.py` and `scripts/explore_xpts.py` where `PlayerSnapshot` was missing required fields (`expected_goal_involvements`, `expected_goals_conceded`) and `defensive_contribution_per_90` was incorrectly mapped to `expected_goals_conceded_per_90`. Replaced dummy instantiation with full snapshots from `player_snapshots_from_bootstrap()`.
+- **Wildcard Optimization Objective**: Re-formulated `optimization.optimize_wildcard()` to maximize starting XI + captain expected points under budget and formation constraints rather than total 15-man squad xPts.
+- **Monte Carlo Correlation & Dynamic Games Played**: Correlated simulated player goals and assists with simulated team goals in `simulation.py` via multinomial allocation and assist binomial sampling instead of independent Poisson sampling. Wired dynamic `games_played` to avoid defaulting to 38.0.
+- **Python Compatibility**: Restored `requires-python = ">=3.11"` in `pyproject.toml`.
 - **Minutes Shrinkage Bug**: Fixed a major bug in `src/fpl_alpha/minutes.py` where early-season start probabilities and expected minutes were severely artificially deflated because the empirical-Bayes shrinkage was hardcoded to divide by 38 `GAMES_PER_SEASON`. Made `games_played` dynamic based on the target gameweek.
 - **Reporting Bug**: Fixed an `UnboundLocalError` in `scripts/compare_ep_next.py` when running offline.
 
 ### Added
+- **Step 4 Persistence & Residuals**: Finished Step 4 architecture (`DuckDB consensus → fit_team_goals() → persisted team-xG with market provenance + fit residuals`). Added `fixture_team_xg` table in DuckDB, `FixtureTeamXG` schema, and `fit_and_persist_fixture_team_xg()` in `src/fpl_alpha/team_xg.py` / `storage.py`.
+- **Step 4 CLI Tool**: Added `scripts/fit_team_xg.py` and `--fit` flag to `scripts/build_market_consensus.py` to fit and persist team goals directly from DuckDB odds consensus.
+- **Architecture Integrity**: Preserved primary PropLine → DuckDB → `consensus_from_latest_odds()` pipeline in docs and scripts, keeping The Odds API as a secondary/fallback source.
 - **FPL Strength Fallback**: Added `fit_fpl_team_goals()` to `team_xg.py` to map FPL's native 1-5 FDR ratings into expected goals multipliers, removing the reliance on dummy flat goals during offline runs.
 - **End-to-End Optimization Script**: Created `scripts/optimize_team.py` to calculate projected points and run a Mixed Integer Linear Programming (MILP) model to output the mathematically optimal 15-man Wildcard squad and Starting XI + Captain.
 - **xPts Explorer CLI**: Created `scripts/explore_xpts.py` allowing users to dynamically filter and sort expected points against FPL form, positions, and prices.

@@ -43,3 +43,44 @@ def test_optimize_starting_xi():
     # 1 GKP should be in XI, 1 on bench
     assert sum(1 for p in xi if p.position == "GKP") == 1
     assert sum(1 for p in bench if p.position == "GKP") == 1
+
+
+def test_wildcard_maximizes_xi_and_captain_points():
+    # Construct a pool where spending extra budget on a bench player would
+    # yield higher 15-squad points but lower XI + captain points.
+    players = []
+    # 2 GKPs: 1 starter (4.5m, 4pts), 1 bench (4.0m, 1pt)
+    players.append(PlayerChoice(1, "GKP1", "GKP", 1, 45, 4.0))
+    players.append(PlayerChoice(2, "GKP2", "GKP", 2, 40, 1.0))
+    
+    # 5 DEFs: 3 starters (4.5m, 4pts each), 2 cheap bench (4.0m, 1pt each)
+    for i in range(3, 6):
+        players.append(PlayerChoice(i, f"DEF{i}", "DEF", i, 45, 4.0))
+    for i in range(6, 8):
+        players.append(PlayerChoice(i, f"DEF{i}", "DEF", i, 40, 1.0))
+        
+    # 5 MIDs: 4 starters (5.0m, 5pts each), 1 cheap bench (4.5m, 1.5pts)
+    for i in range(8, 12):
+        players.append(PlayerChoice(i, f"MID{i}", "MID", i, 50, 5.0))
+    players.append(PlayerChoice(12, "MID12", "MID", 12, 45, 1.5))
+    
+    # 3 FWDs:
+    # Option A: Premium captain (14.0m, 12pts), Mid starter (7.0m, 6pts), Cheap bench (4.5m, 1pt) -> cost = 25.5m
+    # Option B: Three balanced FWDs (8.5m, 7pts each) -> total FWD pts = 21, but max captain pts = 7 (so XI+cap = 7*2 + 7*2 = 28 vs 12*2 + 6 = 30)
+    players.append(PlayerChoice(13, "PremiumCap", "FWD", 13, 140, 12.0))
+    players.append(PlayerChoice(14, "MidFWD", "FWD", 14, 70, 6.0))
+    players.append(PlayerChoice(15, "CheapBenchFWD", "FWD", 15, 45, 1.0))
+    
+    # Alternative balanced options
+    players.append(PlayerChoice(16, "BalFWD1", "FWD", 16, 85, 7.0))
+    players.append(PlayerChoice(17, "BalFWD2", "FWD", 17, 85, 7.0))
+    players.append(PlayerChoice(18, "BalFWD3", "FWD", 18, 85, 7.0))
+    
+    # Set budget just enough for PremiumCap (total cost: 45+40 + 3*45+2*40 + 4*50+45 + 140+70+45 = 855)
+    squad, xi_cap_xpts = optimize_wildcard(players, budget=860)
+    xi, cap, bench, total_xi_pts = optimize_starting_xi(squad)
+    
+    # PremiumCap should be chosen and captained to maximize XI + captain points
+    assert any(p.fpl_id == 13 for p in squad)
+    assert cap.fpl_id == 13
+    assert xi_cap_xpts == pytest.approx(total_xi_pts, abs=0.01)

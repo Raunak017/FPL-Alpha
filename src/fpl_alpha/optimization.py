@@ -22,56 +22,95 @@ def optimize_wildcard(
     players: list[PlayerChoice],
     budget: int = 1000,
     max_per_team: int = 3,
+    bench_weight: float = 0.001,
 ) -> tuple[list[PlayerChoice], float]:
-    """Select the optimal 15-man squad from scratch maximizing expected points.
-    
-    Returns the chosen players and the total expected points.
+    """Select the optimal 15-man squad from scratch maximizing starting XI + captain expected points.
+
+    Returns the chosen 15-man squad and the optimal starting XI + captain expected points.
     """
     prob = pulp.LpProblem("FPL_Wildcard_Optimization", pulp.LpMaximize)
-    
+
     # Decision variables
-    player_vars = {
-        p.fpl_id: pulp.LpVariable(f"player_{p.fpl_id}", cat="Binary") 
+    squad_vars = {
+        p.fpl_id: pulp.LpVariable(f"squad_{p.fpl_id}", cat="Binary")
         for p in players
     }
-    
-    # Objective function
-    prob += pulp.lpSum(p.expected_points * player_vars[p.fpl_id] for p in players)
-    
+    start_vars = {
+        p.fpl_id: pulp.LpVariable(f"start_{p.fpl_id}", cat="Binary")
+        for p in players
+    }
+    cap_vars = {
+        p.fpl_id: pulp.LpVariable(f"cap_{p.fpl_id}", cat="Binary")
+        for p in players
+    }
+
+    # Objective function: Maximize XI + Captain expected points (with small tie-breaker for bench)
+    prob += pulp.lpSum(
+        p.expected_points * start_vars[p.fpl_id]
+        + p.expected_points * cap_vars[p.fpl_id]
+        + bench_weight * p.expected_points * (squad_vars[p.fpl_id] - start_vars[p.fpl_id])
+        for p in players
+    )
+
     # Constraints
-    # 1. Total players = 15
-    prob += pulp.lpSum(player_vars[p.fpl_id] for p in players) == 15
-    
-    # 2. Budget constraint
-    prob += pulp.lpSum(p.cost * player_vars[p.fpl_id] for p in players) <= budget
-    
-    # 3. Position limits (15-man squad: 2 GKP, 5 DEF, 5 MID, 3 FWD)
+    # 1. Total squad players = 15
+    prob += pulp.lpSum(squad_vars[p.fpl_id] for p in players) == 15
+
+    # 2. Squad budget constraint
+    prob += pulp.lpSum(p.cost * squad_vars[p.fpl_id] for p in players) <= budget
+
+    # 3. Squad position limits (15-man squad: 2 GKP, 5 DEF, 5 MID, 3 FWD)
     positions = {"GKP": 2, "DEF": 5, "MID": 5, "FWD": 3}
     for pos, limit in positions.items():
         prob += pulp.lpSum(
-            player_vars[p.fpl_id] for p in players if p.position == pos
+            squad_vars[p.fpl_id] for p in players if p.position == pos
         ) == limit
-        
-    # 4. Max players per team
+
+    # 4. Max players per team in squad
     team_ids = {p.team_id for p in players}
     for t_id in team_ids:
         prob += pulp.lpSum(
-            player_vars[p.fpl_id] for p in players if p.team_id == t_id
+            squad_vars[p.fpl_id] for p in players if p.team_id == t_id
         ) <= max_per_team
-        
+
+    # 5. Starting XI must be subset of squad
+    for p in players:
+        prob += start_vars[p.fpl_id] <= squad_vars[p.fpl_id]
+
+    # 6. Total starting players = 11
+    prob += pulp.lpSum(start_vars[p.fpl_id] for p in players) == 11
+
+    # 7. Valid starting formations
+    prob += pulp.lpSum(start_vars[p.fpl_id] for p in players if p.position == "GKP") == 1
+    prob += pulp.lpSum(start_vars[p.fpl_id] for p in players if p.position == "DEF") >= 3
+    prob += pulp.lpSum(start_vars[p.fpl_id] for p in players if p.position == "DEF") <= 5
+    prob += pulp.lpSum(start_vars[p.fpl_id] for p in players if p.position == "MID") >= 2
+    prob += pulp.lpSum(start_vars[p.fpl_id] for p in players if p.position == "MID") <= 5
+    prob += pulp.lpSum(start_vars[p.fpl_id] for p in players if p.position == "FWD") >= 1
+    prob += pulp.lpSum(start_vars[p.fpl_id] for p in players if p.position == "FWD") <= 3
+
+    # 8. Captain must be a starter
+    for p in players:
+        prob += cap_vars[p.fpl_id] <= start_vars[p.fpl_id]
+
+    # 9. Exactly 1 captain
+    prob += pulp.lpSum(cap_vars[p.fpl_id] for p in players) == 1
+
     # Solve
     try:
         prob.solve(pulp.GLPK_CMD(msg=False))
     except pulp.PulpSolverError:
-        prob.solve()
-    
+        prob.solve(pulp.PULP_CBC_CMD(msg=False))
+
     if pulp.LpStatus[prob.status] != 'Optimal':
         raise ValueError(f"No optimal solution found. Status: {pulp.LpStatus[prob.status]}")
-        
-    chosen = [p for p in players if player_vars[p.fpl_id].varValue == 1.0]
-    total_xpts = sum(p.expected_points for p in chosen)
-    
-    return chosen, total_xpts
+
+    chosen = [p for p in players if squad_vars[p.fpl_id].varValue == 1.0]
+    starters = [p for p in players if start_vars[p.fpl_id].varValue == 1.0]
+    captain = next(p for p in players if cap_vars[p.fpl_id].varValue == 1.0)
+    xi_plus_captain_xpts = sum(p.expected_points for p in starters) + captain.expected_points
+
+    return chosen, xi_plus_captain_xpts
 
 def optimize_starting_xi(
     squad_15: list[PlayerChoice]

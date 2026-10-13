@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Demo: REAL EPL market odds -> fair probabilities -> team xG (steps 2 -> 4).
+"""Demo (Secondary / Fallback): The Odds API JSON -> fair probabilities -> team xG.
 
-The full chain on live-market data (unlike ``demo_market_to_xg.py``, which uses
-hardcoded odds): The Odds API EPL slate -> parse per-book decimals ->
-identity-match team names to FPL ids -> de-vig + consensus -> Poisson team xG.
+Secondary/fallback demo using The Odds API JSON feed directly.
+The primary operational pipeline runs through PropLine -> DuckDB:
+    scripts/refresh_propline_odds.py -> scripts/fit_team_xg.py
 
 Budget-safe by default: reads the cached snapshot in ``data/raw/the-odds-api/``
-and spends ZERO credits. Pass ``--live`` to refresh through the (cache-first,
-throttled) client — costs ``#markets x #regions`` credits, so only on a schedule.
+and spends ZERO credits. Pass ``--live`` to refresh through the client.
 
     python scripts/demo_epl_market_to_xg.py            # offline, from cache
     python scripts/demo_epl_market_to_xg.py --live     # refresh (spends credits)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 
 # --- Stage 1: identity ------------------------------------------------------
@@ -203,6 +204,27 @@ class TeamGoalModel:
     p_clean_sheet_home: float
     p_clean_sheet_away: float
     score_dist: dict[str, float] = field(default_factory=dict)  # "h-a" -> prob
+    fit_loss: float = 0.0
+    residuals: dict[str, float] = field(default_factory=dict)
+    market_provenance: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class FixtureTeamXG:
+    """Fitted Poisson team goal parameters and clean sheet probabilities for a fixture,
+    persisted in DuckDB with market provenance and fit residuals.
+    """
+
+    fixture_fpl_id: int
+    provider_key: str
+    captured_at: datetime
+    lambda_home: float
+    lambda_away: float
+    p_clean_sheet_home: float
+    p_clean_sheet_away: float
+    fit_loss: float
+    residuals: dict[str, float] = field(default_factory=dict)
+    market_provenance: dict[str, Any] = field(default_factory=dict)
 
 
 # --- Stage 5-6: player attacking allocation ---------------------------------
