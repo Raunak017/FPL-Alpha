@@ -39,35 +39,34 @@ def main() -> None:
         connection, provider_key="propline", provider_event_ids=args.event_id
     )
     run_id = run_record.run_id
+    current_stage = "load_reference_data"
     try:
+        current_stage = "load_reference_data"
         teams = load_teams(connection)
         players = load_players(connection)
         fixtures = load_fixtures(connection)
         if not teams or not players or not fixtures:
             msg = "Populate FPL teams, players, and fixtures before capturing PropLine odds."
-            fail_odds_ingestion_run(connection, run_id, "validate_reference_data", msg)
+            current_stage = "validate_reference_data"
             raise RuntimeError(msg)
 
         normalized = []
         for event_id in args.event_id:
-            try:
-                payload = odds.propline_epl_event_odds(event_id, markets, force=args.force)
-            except Exception as exc:
-                fail_odds_ingestion_run(connection, run_id, f"fetch_event_odds:{event_id}", str(exc))
-                raise
+            current_stage = f"fetch_event_odds:{event_id}"
+            payload = odds.propline_epl_event_odds(event_id, markets, force=args.force)
 
+            current_stage = f"read_event_cache:{event_id}"
             cache_key = odds.propline_epl_event_odds_cache_key(event_id, markets)
             cache_file = RAW / "propline" / f"{cache_key}.json"
             # This is the local raw-cache write time, not a provider timestamp.
             captured_at = datetime.fromtimestamp(cache_file.stat().st_mtime, tz=timezone.utc)
-            try:
-                normalized.append(
-                    odds.normalize_propline_event_odds(payload, teams, players, fixtures, captured_at)
-                )
-            except Exception as exc:
-                fail_odds_ingestion_run(connection, run_id, f"normalize_event_odds:{event_id}", str(exc))
-                raise
 
+            current_stage = f"normalize_event_odds:{event_id}"
+            normalized.append(
+                odds.normalize_propline_event_odds(payload, teams, players, fixtures, captured_at)
+            )
+
+        current_stage = "store_snapshot_bundle"
         events, mappings, player_mappings, bookmakers, snapshots = zip(*normalized)
         run = store_odds_snapshot_bundle(
             connection,
@@ -80,6 +79,9 @@ def main() -> None:
             records_fetched=sum(map(len, snapshots)),
             run_id=run_id,
         )
+    except Exception as exc:
+        fail_odds_ingestion_run(connection, run_id, current_stage, str(exc))
+        raise
     finally:
         connection.close()
 

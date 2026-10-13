@@ -962,13 +962,24 @@ def fail_odds_ingestion_run(
 ) -> None:
     """Record an odds ingestion run failure with stage and error details."""
     finished_at = finished_at or datetime.now(timezone.utc)
+    try:
+        connection.execute("ROLLBACK")
+    except Exception:
+        pass
+
     row = connection.execute(
-        "SELECT CAST(started_at AS VARCHAR) FROM odds_ingestion_runs WHERE run_id = ?",
+        "SELECT status, CAST(started_at AS VARCHAR) FROM odds_ingestion_runs WHERE run_id = ?",
         [run_id],
     ).fetchone()
+    if not row:
+        return
+    status, started_str = row[0], row[1]
+    if status == "FAILED":
+        return
+
     duration_ms = None
-    if row and row[0]:
-        started = datetime.fromisoformat(row[0].replace(" ", "T"))
+    if started_str:
+        started = datetime.fromisoformat(started_str.replace(" ", "T"))
         duration_ms = (finished_at - started).total_seconds() * 1000.0
 
     connection.execute(
@@ -1085,6 +1096,28 @@ def insert_odds_outcome_snapshots(
             [tmp.name],
         )
         try:
+            conflict_count = connection.execute(
+                f"""
+                SELECT count(*)
+                FROM {stage_table} AS s
+                JOIN odds_outcome_snapshots AS t
+                  ON s.provider_key = t.provider_key
+                 AND s.provider_event_id = t.provider_event_id
+                 AND s.bookmaker_key = t.bookmaker_key
+                 AND s.market_key = t.market_key
+                 AND s.market_ordinal = t.market_ordinal
+                 AND s.outcome_ordinal = t.outcome_ordinal
+                 AND s.captured_at = t.captured_at
+                WHERE s.american_price != t.american_price
+                   OR s.point IS DISTINCT FROM t.point
+                   OR s.outcome_name IS DISTINCT FROM t.outcome_name
+                """
+            ).fetchone()[0]
+            if conflict_count > 0:
+                raise IngestionValidationError(
+                    f"Found {conflict_count} conflicting odds records with different prices for existing snapshot keys"
+                )
+
             connection.execute(
                 f"""
                 INSERT INTO odds_outcome_snapshots (
@@ -1129,63 +1162,46 @@ def store_odds_snapshot_bundle(
     started_at = datetime.now(timezone.utc)
     run_id = run_id or f"run_{started_at.strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
 
-    events_list = list(events)
-    event_fixture_mappings_list = list(event_fixture_mappings)
-    player_mappings_list = list(player_mappings)
-    bookmakers_list = list(bookmakers)
-    snapshots_list = list(snapshots)
-
-    provider_event_ids = tuple(sorted({e.provider_event_id for e in events_list}))
-    records_parsed = len(snapshots_list)
-    records_fetched = records_fetched if records_fetched is not None else records_parsed
-
-    input_fingerprint = compute_odds_snapshots_fingerprint(provider_key, snapshots_list)
-
-    # Step 1: Pre-create or update RUNNING record (autocommit, survives subsequent rollbacks)
-    existing_started = connection.execute(
-        "SELECT CAST(started_at AS VARCHAR) FROM odds_ingestion_runs WHERE run_id = ?",
-        [run_id],
-    ).fetchone()
-    if existing_started and existing_started[0]:
-        started_at = datetime.fromisoformat(existing_started[0].replace(" ", "T"))
-
-    connection.execute(
-        """
-        INSERT INTO odds_ingestion_runs (
-            run_id, provider_key, provider_event_ids, input_fingerprint,
-            status, failure_stage, error_message, records_fetched,
-            records_parsed, records_inserted, records_updated, records_rejected,
-            started_at, finished_at, duration_ms, retry_of_run_id, is_retry
-        ) VALUES (?, ?, ?, ?, 'RUNNING', NULL, NULL, ?, ?, 0, 0, 0, ?, NULL, NULL, NULL, FALSE)
-        ON CONFLICT (run_id) DO UPDATE SET
-            provider_key = excluded.provider_key,
-            provider_event_ids = excluded.provider_event_ids,
-            input_fingerprint = excluded.input_fingerprint,
-            status = 'RUNNING',
-            failure_stage = NULL,
-            error_message = NULL,
-            records_fetched = excluded.records_fetched,
-            records_parsed = excluded.records_parsed,
-            records_inserted = 0,
-            records_updated = 0,
-            records_rejected = 0,
-            started_at = excluded.started_at
-        """,
-        [
-            run_id,
-            provider_key,
-            list(provider_event_ids),
-            input_fingerprint,
-            records_fetched,
-            records_parsed,
-            started_at,
-        ],
+    # Step 1: Pre-create or ensure RUNNING record in DuckDB immediately
+    start_odds_ingestion_run(
+        connection, provider_key=provider_key, run_id=run_id, started_at=started_at
     )
 
-    stage_table = f"stage_odds_{uuid.uuid4().hex[:8]}"
-    failure_stage = "staging"
-    connection.execute("BEGIN TRANSACTION")
+    stage_table: str | None = None
+    failure_stage = "prepare_inputs"
+    in_transaction = False
     try:
+        failure_stage = "prepare_inputs"
+        events_list = list(events)
+        event_fixture_mappings_list = list(event_fixture_mappings)
+        player_mappings_list = list(player_mappings)
+        bookmakers_list = list(bookmakers)
+        snapshots_list = list(snapshots)
+
+        provider_event_ids = tuple(sorted({e.provider_event_id for e in events_list}))
+        records_parsed = len(snapshots_list)
+        records_fetched = records_fetched if records_fetched is not None else records_parsed
+
+        failure_stage = "compute_fingerprint"
+        input_fingerprint = compute_odds_snapshots_fingerprint(provider_key, snapshots_list)
+
+        connection.execute(
+            """
+            UPDATE odds_ingestion_runs SET
+                provider_event_ids = ?,
+                input_fingerprint = ?,
+                records_fetched = ?,
+                records_parsed = ?
+            WHERE run_id = ?
+            """,
+            [list(provider_event_ids), input_fingerprint, records_fetched, records_parsed, run_id],
+        )
+
+        stage_table = f"stage_odds_{uuid.uuid4().hex[:8]}"
+        failure_stage = "staging"
+        connection.execute("BEGIN TRANSACTION")
+        in_transaction = True
+
         if snapshots_list:
             with tempfile.NamedTemporaryFile("w+", suffix=".ndjson", delete=True) as tmp:
                 for snapshot in snapshots_list:
@@ -1265,6 +1281,35 @@ def store_odds_snapshot_bundle(
                     f"Found {duplicate_key_count} duplicate primary key combinations in staging batch"
                 )
 
+            # Validation 4: Conflicting odds prices against existing snapshots
+            failure_stage = "validation_conflicting_prices"
+            conflict_row = connection.execute(
+                f"""
+                SELECT count(*),
+                       min(s.provider_event_id),
+                       min(s.bookmaker_key),
+                       min(s.market_key)
+                FROM {stage_table} AS s
+                JOIN odds_outcome_snapshots AS t
+                  ON s.provider_key = t.provider_key
+                 AND s.provider_event_id = t.provider_event_id
+                 AND s.bookmaker_key = t.bookmaker_key
+                 AND s.market_key = t.market_key
+                 AND s.market_ordinal = t.market_ordinal
+                 AND s.outcome_ordinal = t.outcome_ordinal
+                 AND s.captured_at = t.captured_at
+                WHERE s.american_price != t.american_price
+                   OR s.point IS DISTINCT FROM t.point
+                   OR s.outcome_name IS DISTINCT FROM t.outcome_name
+                """
+            ).fetchone()
+            conflict_count = conflict_row[0] if conflict_row else 0
+            if conflict_count > 0:
+                raise IngestionValidationError(
+                    f"Found {conflict_count} conflicting odds records with different prices for existing snapshot keys "
+                    f"(event={conflict_row[1]}, bookmaker={conflict_row[2]}, market={conflict_row[3]})"
+                )
+
             # Upsert metadata inside the transaction
             failure_stage = "upsert_metadata"
             upsert_odds_provider_events(connection, events_list)
@@ -1314,6 +1359,7 @@ def store_odds_snapshot_bundle(
                 """
             )
             connection.execute(f"DROP TABLE {stage_table}")
+            stage_table = None
         else:
             failure_stage = "upsert_metadata"
             upsert_odds_provider_events(connection, events_list)
@@ -1388,6 +1434,7 @@ def store_odds_snapshot_bundle(
             [records_inserted, records_updated, finished_at, duration_ms, retry_of_run_id, is_retry, run_id],
         )
         connection.execute("COMMIT")
+        in_transaction = False
 
         return OddsIngestionRun(
             run_id=run_id,
@@ -1409,22 +1456,17 @@ def store_odds_snapshot_bundle(
             is_retry=is_retry,
         )
     except Exception as exc:
-        connection.execute("ROLLBACK")
-        connection.execute(f"DROP TABLE IF EXISTS {stage_table}")
-        finished_at = datetime.now(timezone.utc)
-        duration_ms = (finished_at - started_at).total_seconds() * 1000.0
-        connection.execute(
-            """
-            UPDATE odds_ingestion_runs SET
-                status = 'FAILED',
-                failure_stage = ?,
-                error_message = ?,
-                finished_at = ?,
-                duration_ms = ?
-            WHERE run_id = ?
-            """,
-            [failure_stage, str(exc), finished_at, duration_ms, run_id],
-        )
+        if in_transaction:
+            try:
+                connection.execute("ROLLBACK")
+            except Exception:
+                pass
+        if stage_table:
+            try:
+                connection.execute(f"DROP TABLE IF EXISTS {stage_table}")
+            except Exception:
+                pass
+        fail_odds_ingestion_run(connection, run_id, failure_stage, str(exc))
         raise
 
 
