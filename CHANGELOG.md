@@ -3,6 +3,21 @@
 Notable user-visible features, persistence changes, and operational workflow
 updates. Add an entry here before committing related work.
 
+## 2026-10-12
+
+### Added
+
+- Vectorized staging architecture for odds ingestion via temporary typed NDJSON staging, dropping ingestion latency to ~2s for 27k rows and under 12s for 250k rows with <2 MB Python staging memory.
+- `odds_ingestion_runs` table in DuckDB tracking run status (`RUNNING`, `COMPLETED`, `FAILED`), failure stage, error message, duration, input fingerprint, and inserted/updated record counts.
+- `scripts/benchmark_odds_ingestion.py` for evaluating odds ingestion performance and peak memory at 27k, 100k, and 250k row scales.
+- Resilience test suite in `tests/test_odds_ingestion_resilience.py` covering atomic rollbacks, recovery, validation checks, and idempotency.
+
+### Changed
+
+- `odds_outcome_snapshots` now links records to `run_id`.
+- Downstream market consensus (`markets.consensus_from_latest_odds`) now excludes incomplete or failed ingestion runs.
+- `refresh_upcoming_propline_odds.py` and `refresh_propline_odds.py` now invoke `store_odds_snapshot_bundle` with atomic transaction boundaries and audit run logging.
+
 ## 2026-10-06 — `2a43a99`
 
 ### Added

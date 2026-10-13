@@ -121,9 +121,12 @@ def consensus_from_latest_odds(
             JOIN odds_event_fixture_mappings AS m
               ON m.provider_key = s.provider_key
              AND m.provider_event_id = s.provider_event_id
+            LEFT JOIN odds_ingestion_runs AS r
+              ON r.run_id = s.run_id
             WHERE s.provider_key = ?
               AND m.fpl_fixture_id = ?
               AND s.market_key IN ('h2h', 'totals', 'both_teams_to_score')
+              AND (s.run_id IS NULL OR r.status = 'COMPLETED')
             GROUP BY ALL
         )
         SELECT
@@ -142,11 +145,14 @@ def consensus_from_latest_odds(
         JOIN odds_event_fixture_mappings AS m
           ON m.provider_key = s.provider_key
          AND m.provider_event_id = s.provider_event_id
+        LEFT JOIN odds_ingestion_runs AS r
+          ON r.run_id = s.run_id
         JOIN fixtures AS f ON f.fpl_id = m.fpl_fixture_id
         JOIN teams AS home ON home.fpl_id = f.team_h_fpl_id
         JOIN teams AS away ON away.fpl_id = f.team_a_fpl_id
         WHERE s.provider_key = ?
           AND m.fpl_fixture_id = ?
+          AND (s.run_id IS NULL OR r.status = 'COMPLETED')
         """,
         [provider_key, fixture_fpl_id, provider_key, fixture_fpl_id],
     ).fetchall()

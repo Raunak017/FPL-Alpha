@@ -84,6 +84,7 @@ def test_open_database_initializes_fpl_and_odds_tables(tmp_path):
         "odds_bookmakers",
         "odds_player_mappings",
         "odds_outcome_snapshots",
+        "odds_ingestion_runs",
     } <= tables
 
 

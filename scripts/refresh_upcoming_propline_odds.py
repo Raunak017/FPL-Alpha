@@ -10,15 +10,11 @@ from fpl_alpha.ingestion import odds
 from fpl_alpha.ingestion.refresh import refresh_fpl_database
 from fpl_alpha.schemas import OddsProviderEvent
 from fpl_alpha.storage import (
-    insert_odds_outcome_snapshots,
     load_fixtures,
     load_players,
     load_teams,
     open_database,
-    upsert_odds_bookmakers,
-    upsert_odds_event_fixture_mappings,
-    upsert_odds_player_mappings,
-    upsert_odds_provider_events,
+    store_odds_snapshot_bundle,
 )
 
 
@@ -67,24 +63,16 @@ def main() -> None:
 
         if normalized:
             events, mappings, player_mappings, bookmakers, snapshots = zip(*normalized)
-            connection.execute("BEGIN TRANSACTION")
-            try:
-                upsert_odds_provider_events(connection, events)
-                upsert_odds_event_fixture_mappings(connection, mappings)
-                upsert_odds_player_mappings(
-                    connection, (mapping for group in player_mappings for mapping in group)
-                )
-                upsert_odds_bookmakers(
-                    connection, (bookmaker for group in bookmakers for bookmaker in group)
-                )
-                insert_odds_outcome_snapshots(
-                    connection, (snapshot for group in snapshots for snapshot in group)
-                )
-            except Exception:
-                connection.execute("ROLLBACK")
-                raise
-            else:
-                connection.execute("COMMIT")
+            run = store_odds_snapshot_bundle(
+                connection,
+                provider_key="propline",
+                events=events,
+                event_fixture_mappings=mappings,
+                player_mappings=(m for group in player_mappings for m in group),
+                bookmakers=(b for group in bookmakers for b in group),
+                snapshots=(s for group in snapshots for s in group),
+                records_fetched=sum(map(len, snapshots)),
+            )
 
             unresolved = sorted(
                 {
@@ -96,6 +84,7 @@ def main() -> None:
             )
             outcome_count = sum(map(len, snapshots))
         else:
+            run = None
             unresolved = []
             outcome_count = 0
     finally:
@@ -109,6 +98,11 @@ def main() -> None:
         f"PropLine odds stored: {len(selected)} mapped upcoming events, "
         f"{outcome_count} outcomes."
     )
+    if run is not None:
+        print(
+            f"Ingestion run {run.run_id} ({run.status}) in {run.duration_ms:.1f}ms: "
+            f"{run.records_inserted} inserted, {run.records_updated} updated."
+        )
     if unmapped:
         print(
             f"Unmapped PropLine events ({len(unmapped)}): "

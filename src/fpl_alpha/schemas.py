@@ -209,6 +209,28 @@ class OddsOutcomeSnapshot:
     last_update: str | None
     last_change_at: str | None
     captured_at: datetime
+    run_id: str | None = None
+
+
+@dataclass(frozen=True)
+class OddsIngestionRun:
+    """Audit and status record for an atomic odds ingestion run."""
+
+    run_id: str
+    provider_key: str
+    provider_event_ids: tuple[str, ...]
+    input_fingerprint: str
+    status: str
+    failure_stage: str | None
+    error_message: str | None
+    records_fetched: int
+    records_parsed: int
+    records_inserted: int
+    records_updated: int
+    records_rejected: int
+    started_at: datetime
+    finished_at: datetime | None
+    duration_ms: float | None
 
 
 # --- Stage 3: no-vig market probabilities -----------------------------------

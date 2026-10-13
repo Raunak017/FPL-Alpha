@@ -12,15 +12,11 @@ from datetime import datetime, timezone
 from fpl_alpha.config import RAW
 from fpl_alpha.ingestion import odds
 from fpl_alpha.storage import (
-    insert_odds_outcome_snapshots,
     load_fixtures,
     load_players,
     load_teams,
     open_database,
-    upsert_odds_bookmakers,
-    upsert_odds_event_fixture_mappings,
-    upsert_odds_player_mappings,
-    upsert_odds_provider_events,
+    store_odds_snapshot_bundle,
 )
 
 
@@ -55,25 +51,16 @@ def main() -> None:
                 odds.normalize_propline_event_odds(payload, teams, players, fixtures, captured_at)
             )
         events, mappings, player_mappings, bookmakers, snapshots = zip(*normalized)
-
-        connection.execute("BEGIN TRANSACTION")
-        try:
-            upsert_odds_provider_events(connection, events)
-            upsert_odds_event_fixture_mappings(connection, mappings)
-            upsert_odds_player_mappings(
-                connection, (mapping for group in player_mappings for mapping in group)
-            )
-            upsert_odds_bookmakers(
-                connection, (bookmaker for group in bookmakers for bookmaker in group)
-            )
-            insert_odds_outcome_snapshots(
-                connection, (snapshot for group in snapshots for snapshot in group)
-            )
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
-        else:
-            connection.execute("COMMIT")
+        run = store_odds_snapshot_bundle(
+            connection,
+            provider_key="propline",
+            events=events,
+            event_fixture_mappings=mappings,
+            player_mappings=(m for group in player_mappings for m in group),
+            bookmakers=(b for group in bookmakers for b in group),
+            snapshots=(s for group in snapshots for s in group),
+            records_fetched=sum(map(len, snapshots)),
+        )
     finally:
         connection.close()
 
@@ -84,6 +71,10 @@ def main() -> None:
         if mapping.fpl_player_id is None
     ]
     print(f"PropLine odds stored: {len(events)} events, {sum(map(len, snapshots))} outcomes.")
+    print(
+        f"Ingestion run {run.run_id} ({run.status}) in {run.duration_ms:.1f}ms: "
+        f"{run.records_inserted} inserted, {run.records_updated} updated."
+    )
     if unresolved:
         print(f"Unmatched player props ({len(unresolved)}): {', '.join(sorted(unresolved))}")
 
