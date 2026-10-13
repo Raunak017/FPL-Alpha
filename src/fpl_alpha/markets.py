@@ -102,15 +102,13 @@ def _logit(probability: float) -> float:
     return log(probability / (1.0 - probability))
 
 
-def consensus_from_latest_odds(
-    connection: Any, fixture_fpl_id: int, provider_key: str = "propline"
-) -> list[MarketProb]:
-    """Build fair match-market probabilities from latest complete book snapshots.
+from datetime import datetime
 
-    Prices are de-vigged within each bookmaker and averaged equally. A bookmaker
-    contributes only when one captured market has every required outcome; player
-    props and team totals are intentionally excluded from this Step 3 bridge.
-    """
+
+def _eligible_market_books_and_provenance(
+    connection: Any, fixture_fpl_id: int, provider_key: str = "propline"
+) -> tuple[dict[str, list[list[float]]], list[tuple[str, datetime]]]:
+    """Extract complete eligible bookmaker odds and their provenance for a fixture."""
     rows = connection.execute(
         """
         WITH latest AS (
@@ -134,7 +132,8 @@ def consensus_from_latest_odds(
             s.market_description, s.market_team, s.outcome_name, s.american_price,
             s.point, f.team_h_fpl_id, f.team_a_fpl_id,
             home.name, home.short_name, home.aliases,
-            away.name, away.short_name, away.aliases
+            away.name, away.short_name, away.aliases,
+            CAST(s.captured_at AS VARCHAR) AS captured_at
         FROM odds_outcome_snapshots AS s
         JOIN latest
           ON latest.provider_event_id = s.provider_event_id
@@ -158,6 +157,7 @@ def consensus_from_latest_odds(
     ).fetchall()
 
     books: dict[tuple[str, str], dict[str, list[float]]] = {}
+    book_meta: dict[tuple[str, str], tuple[str, datetime]] = {}
     for row in rows:
         (
             provider_event_id,
@@ -177,6 +177,7 @@ def consensus_from_latest_odds(
             away_name,
             away_short_name,
             away_aliases,
+            captured_at_str,
         ) = row
         home = Team(home_id, home_name, home_short_name, tuple(home_aliases))
         away = Team(away_id, away_name, away_short_name, tuple(away_aliases))
@@ -196,13 +197,17 @@ def consensus_from_latest_odds(
         books.setdefault(book_key, {}).setdefault(outcome, []).append(
             american_to_decimal(american_price)
         )
+        cap_time = datetime.fromisoformat(str(captured_at_str).replace("Z", "+00:00"))
+        book_meta[book_key] = (provider_event_id, cap_time)
 
     grouped: dict[str, list[list[float]]] = {}
-    for (market, _), outcomes in books.items():
+    market_books: dict[str, list[tuple[str, str]]] = {}
+    for (market, book_id), outcomes in books.items():
         order = _market_outcome_order(market)
         if order is None or set(outcomes) != set(order) or any(len(outcomes[o]) != 1 for o in order):
             continue
         grouped.setdefault(market, []).append([outcomes[outcome][0] for outcome in order])
+        market_books.setdefault(market, []).append((market, book_id))
 
     total_markets = [market for market in grouped if market.startswith("totals_")]
     if total_markets:
@@ -215,12 +220,54 @@ def consensus_from_latest_odds(
             for market, book_rows in grouped.items()
             if not market.startswith("totals_") or market == primary_total
         }
+        market_books = {
+            market: book_keys
+            for market, book_keys in market_books.items()
+            if not market.startswith("totals_") or market == primary_total
+        }
 
+    eligible_provenance: list[tuple[str, datetime]] = [
+        book_meta[book_key]
+        for book_keys in market_books.values()
+        for book_key in book_keys
+    ]
+    return grouped, eligible_provenance
+
+
+def consensus_from_latest_odds(
+    connection: Any, fixture_fpl_id: int, provider_key: str = "propline"
+) -> list[MarketProb]:
+    """Build fair match-market probabilities from latest complete book snapshots.
+
+    Prices are de-vigged within each bookmaker and averaged equally. A bookmaker
+    contributes only when one captured market has every required outcome; player
+    props and team totals are intentionally excluded from this Step 3 bridge.
+    """
+    grouped, _ = _eligible_market_books_and_provenance(connection, fixture_fpl_id, provider_key)
     return [
         probability
         for market, book_rows in sorted(grouped.items())
         for probability in consensus(str(fixture_fpl_id), market, _market_outcome_order(market) or (), book_rows)
     ]
+
+
+def latest_odds_snapshot_provenance(
+    connection: Any, fixture_fpl_id: int, provider_key: str = "propline"
+) -> tuple[tuple[str, ...], datetime, datetime, int]:
+    """Return the provenance for the exact eligible market snapshots feeding fixture consensus."""
+    _, eligible_provenance = _eligible_market_books_and_provenance(
+        connection, fixture_fpl_id, provider_key
+    )
+    if not eligible_provenance:
+        raise ValueError(f"no odds snapshot provenance for fixture {fixture_fpl_id}")
+    event_ids = tuple(sorted({str(item[0]) for item in eligible_provenance}))
+    captured_at = [item[1] for item in eligible_provenance]
+    return (
+        event_ids,
+        min(captured_at),
+        max(captured_at),
+        len(eligible_provenance),
+    )
 
 
 def _normalize_match_outcome(

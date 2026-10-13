@@ -10,10 +10,13 @@ from fpl_alpha.ingestion import odds
 from fpl_alpha.ingestion.refresh import refresh_fpl_database
 from fpl_alpha.schemas import OddsProviderEvent
 from fpl_alpha.storage import (
+    complete_empty_odds_ingestion_run,
+    fail_odds_ingestion_run,
     load_fixtures,
     load_players,
     load_teams,
     open_database,
+    start_odds_ingestion_run,
     store_odds_snapshot_bundle,
 )
 
@@ -38,11 +41,20 @@ def main() -> None:
     now = datetime.now(timezone.utc)
 
     connection = open_database()
+    run = None
+    unresolved = []
+    outcome_count = 0
+    run_record = start_odds_ingestion_run(connection, provider_key="propline")
+    run_id = run_record.run_id
     try:
         teams = load_teams(connection)
         players = load_players(connection)
         fixtures = load_fixtures(connection)
-        event_payloads = odds.propline_epl_events(force=args.force)
+        try:
+            event_payloads = odds.propline_epl_events(force=args.force)
+        except Exception as exc:
+            fail_odds_ingestion_run(connection, run_id, "fetch_epl_events", str(exc))
+            raise
 
         selected, unmapped, skipped = odds.mapped_upcoming_propline_events(
             event_payloads, teams, fixtures, now, args.gameweek
@@ -51,15 +63,24 @@ def main() -> None:
         normalized = []
         for event, _ in selected:
             event_id = event.provider_event_id
-            payload = odds.propline_epl_event_odds(event_id, markets, force=args.force)
+            try:
+                payload = odds.propline_epl_event_odds(event_id, markets, force=args.force)
+            except Exception as exc:
+                fail_odds_ingestion_run(connection, run_id, f"fetch_event_odds:{event_id}", str(exc))
+                raise
+
             cache_key = odds.propline_epl_event_odds_cache_key(event_id, markets)
             cache_file = RAW / "propline" / f"{cache_key}.json"
             captured_at = datetime.fromtimestamp(cache_file.stat().st_mtime, tz=timezone.utc)
-            normalized.append(
-                odds.normalize_propline_event_odds(
-                    payload, teams, players, fixtures, captured_at
+            try:
+                normalized.append(
+                    odds.normalize_propline_event_odds(
+                        payload, teams, players, fixtures, captured_at
+                    )
                 )
-            )
+            except Exception as exc:
+                fail_odds_ingestion_run(connection, run_id, f"normalize_event_odds:{event_id}", str(exc))
+                raise
 
         if normalized:
             events, mappings, player_mappings, bookmakers, snapshots = zip(*normalized)
@@ -72,6 +93,7 @@ def main() -> None:
                 bookmakers=(b for group in bookmakers for b in group),
                 snapshots=(s for group in snapshots for s in group),
                 records_fetched=sum(map(len, snapshots)),
+                run_id=run_id,
             )
 
             unresolved = sorted(
@@ -84,7 +106,9 @@ def main() -> None:
             )
             outcome_count = sum(map(len, snapshots))
         else:
-            run = None
+            run = complete_empty_odds_ingestion_run(
+                connection, run_id, provider_key="propline"
+            )
             unresolved = []
             outcome_count = 0
     finally:

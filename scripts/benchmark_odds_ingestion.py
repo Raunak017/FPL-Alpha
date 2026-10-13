@@ -6,6 +6,7 @@ import gc
 import resource
 import time
 import tracemalloc
+import multiprocessing
 from datetime import datetime, timezone
 
 from fpl_alpha.schemas import (
@@ -93,7 +94,7 @@ def _generate_synthetic_bundle(
     return events, mappings, player_mappings, bookmakers, snapshots
 
 
-def run_benchmark(n_records: int) -> dict[str, float | int | str]:
+def _run_benchmark_worker(n_records: int, queue: multiprocessing.Queue) -> None:
     gc.collect()
     con = open_database(":memory:")
     upsert_teams(con, [Team(1, "Arsenal", "ARS"), Team(2, "Chelsea", "CHE")])
@@ -140,8 +141,8 @@ def run_benchmark(n_records: int) -> dict[str, float | int | str]:
     current_mem, peak_tracemalloc = tracemalloc.get_traced_memory()
     tracemalloc.stop()
 
-    # Peak RSS (resident memory)
-    peak_rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024)  # macOS is in bytes
+    # Peak RSS (resident memory) in this fresh child process
+    peak_rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024)
 
     # Test idempotent re-ingestion time
     t_retry_start = time.perf_counter()
@@ -159,7 +160,7 @@ def run_benchmark(n_records: int) -> dict[str, float | int | str]:
     db_rows = con.execute("SELECT count(*) FROM odds_outcome_snapshots").fetchone()[0]
     con.close()
 
-    return {
+    result = {
         "n_records": n_records,
         "run_id": run.run_id,
         "total_time_s": round(t_total, 3),
@@ -169,7 +170,20 @@ def run_benchmark(n_records: int) -> dict[str, float | int | str]:
         "db_rows": db_rows,
         "records_inserted": run.records_inserted,
         "records_updated": retry_run.records_updated,
+        "is_retry": retry_run.is_retry,
+        "retry_of_run_id": retry_run.retry_of_run_id,
     }
+    queue.put(result)
+
+
+def run_benchmark(n_records: int) -> dict[str, float | int | str]:
+    ctx = multiprocessing.get_context("spawn")
+    queue = ctx.Queue()
+    proc = ctx.Process(target=_run_benchmark_worker, args=(n_records, queue))
+    proc.start()
+    result = queue.get()
+    proc.join()
+    return result
 
 
 def main():

@@ -219,7 +219,7 @@ class OddsIngestionRun:
     run_id: str
     provider_key: str
     provider_event_ids: tuple[str, ...]
-    input_fingerprint: str
+    input_fingerprint: str | None
     status: str
     failure_stage: str | None
     error_message: str | None
@@ -231,6 +231,8 @@ class OddsIngestionRun:
     started_at: datetime
     finished_at: datetime | None
     duration_ms: float | None
+    retry_of_run_id: str | None = None
+    is_retry: bool = False
 
 
 # --- Stage 3: no-vig market probabilities -----------------------------------

@@ -3,6 +3,19 @@
 Notable user-visible features, persistence changes, and operational workflow
 updates. Add an entry here before committing related work.
 
+## 2026-10-13
+
+### Added
+
+- Content-derived canonical SHA-256 fingerprinting for normalized odds snapshot bundles.
+- Explicit retry tracking in `odds_ingestion_runs` (`is_retry`, `retry_of_run_id`) preserving original snapshot ingestion ownership (`run_id`) on idempotent re-runs.
+- Pre-ingestion run lifecycle observability tracking early-stage failures across API fetching (`fetch_epl_events`, `fetch_event_odds`) and normalization (`normalize_event_odds`).
+- Isolated child-process RSS benchmarking in `scripts/benchmark_odds_ingestion.py` using spawned workers for unpolluted peak memory measurement.
+
+### Changed
+
+- `latest_odds_snapshot_provenance` unified with `consensus_from_latest_odds` to use identical eligible market criteria (completed runs, full books, primary 2.5 totals).
+
 ## 2026-10-12
 
 ### Added

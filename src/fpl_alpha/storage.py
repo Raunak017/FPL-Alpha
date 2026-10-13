@@ -210,7 +210,7 @@ def initialize_schema(connection: duckdb.DuckDBPyConnection) -> None:
             run_id VARCHAR PRIMARY KEY,
             provider_key VARCHAR NOT NULL,
             provider_event_ids VARCHAR[] NOT NULL,
-            input_fingerprint VARCHAR NOT NULL,
+            input_fingerprint VARCHAR,
             status VARCHAR NOT NULL,
             failure_stage VARCHAR,
             error_message VARCHAR,
@@ -221,7 +221,9 @@ def initialize_schema(connection: duckdb.DuckDBPyConnection) -> None:
             records_rejected INTEGER NOT NULL DEFAULT 0,
             started_at TIMESTAMPTZ NOT NULL,
             finished_at TIMESTAMPTZ,
-            duration_ms DOUBLE
+            duration_ms DOUBLE,
+            retry_of_run_id VARCHAR,
+            is_retry BOOLEAN DEFAULT FALSE
         );
 
         CREATE TABLE IF NOT EXISTS odds_outcome_snapshots (
@@ -311,6 +313,9 @@ def initialize_schema(connection: duckdb.DuckDBPyConnection) -> None:
         ALTER TABLE player_gameweek_history ALTER COLUMN transfers_in DROP NOT NULL;
         ALTER TABLE player_gameweek_history ALTER COLUMN transfers_out DROP NOT NULL;
         ALTER TABLE odds_outcome_snapshots ADD COLUMN IF NOT EXISTS run_id VARCHAR;
+        ALTER TABLE odds_ingestion_runs ADD COLUMN IF NOT EXISTS retry_of_run_id VARCHAR;
+        ALTER TABLE odds_ingestion_runs ADD COLUMN IF NOT EXISTS is_retry BOOLEAN DEFAULT FALSE;
+        ALTER TABLE odds_ingestion_runs ALTER COLUMN input_fingerprint DROP NOT NULL;
 
         CREATE OR REPLACE VIEW player_snapshot_values AS
         SELECT
@@ -860,6 +865,184 @@ def _snapshot_to_dict(s: OddsOutcomeSnapshot, run_id: str | None = None) -> dict
     }
 
 
+def compute_odds_snapshots_fingerprint(
+    provider_key: str, snapshots: Iterable[OddsOutcomeSnapshot]
+) -> str:
+    """Generate deterministic SHA-256 fingerprint from actual normalized snapshot content."""
+    snapshots_list = list(snapshots)
+    if not snapshots_list:
+        return hashlib.sha256(f"{provider_key}:empty".encode("utf-8")).hexdigest()
+
+    sorted_snapshots = sorted(
+        snapshots_list,
+        key=lambda s: (
+            s.provider_event_id,
+            s.bookmaker_key,
+            s.market_key,
+            s.market_ordinal,
+            s.outcome_ordinal,
+            s.captured_at.isoformat() if isinstance(s.captured_at, datetime) else str(s.captured_at),
+        ),
+    )
+
+    h = hashlib.sha256()
+    h.update(provider_key.encode("utf-8"))
+    for s in sorted_snapshots:
+        cap_str = (
+            s.captured_at.isoformat()
+            if isinstance(s.captured_at, datetime)
+            else str(s.captured_at)
+        )
+        line = (
+            f"{s.provider_event_id}|{s.bookmaker_key}|{s.market_key}|{s.market_ordinal}|"
+            f"{s.market_description}|{s.market_team or ''}|{s.outcome_ordinal}|"
+            f"{s.selection_description or ''}|{s.fpl_player_id or ''}|{s.outcome_name}|"
+            f"{s.american_price}|{s.point if s.point is not None else ''}|{cap_str}\n"
+        )
+        h.update(line.encode("utf-8"))
+    return h.hexdigest()
+
+
+def start_odds_ingestion_run(
+    connection: duckdb.DuckDBPyConnection,
+    provider_key: str,
+    provider_event_ids: Iterable[str] = (),
+    *,
+    run_id: str | None = None,
+    started_at: datetime | None = None,
+) -> OddsIngestionRun:
+    """Pre-create or register a RUNNING odds ingestion run record in DuckDB."""
+    started_at = started_at or datetime.now(timezone.utc)
+    run_id = run_id or f"run_{started_at.strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    event_ids = tuple(sorted(str(eid) for eid in provider_event_ids))
+    connection.execute(
+        """
+        INSERT INTO odds_ingestion_runs (
+            run_id, provider_key, provider_event_ids, input_fingerprint,
+            status, failure_stage, error_message, records_fetched,
+            records_parsed, records_inserted, records_updated, records_rejected,
+            started_at, finished_at, duration_ms, retry_of_run_id, is_retry
+        ) VALUES (?, ?, ?, NULL, 'RUNNING', NULL, NULL, 0, 0, 0, 0, 0, ?, NULL, NULL, NULL, FALSE)
+        ON CONFLICT (run_id) DO UPDATE SET
+            provider_key = excluded.provider_key,
+            provider_event_ids = excluded.provider_event_ids,
+            status = 'RUNNING',
+            started_at = excluded.started_at
+        """,
+        [run_id, provider_key, list(event_ids), started_at],
+    )
+    return OddsIngestionRun(
+        run_id=run_id,
+        provider_key=provider_key,
+        provider_event_ids=event_ids,
+        input_fingerprint=None,
+        status="RUNNING",
+        failure_stage=None,
+        error_message=None,
+        records_fetched=0,
+        records_parsed=0,
+        records_inserted=0,
+        records_updated=0,
+        records_rejected=0,
+        started_at=started_at,
+        finished_at=None,
+        duration_ms=None,
+        retry_of_run_id=None,
+        is_retry=False,
+    )
+
+
+def fail_odds_ingestion_run(
+    connection: duckdb.DuckDBPyConnection,
+    run_id: str,
+    failure_stage: str,
+    error_message: str,
+    *,
+    finished_at: datetime | None = None,
+) -> None:
+    """Record an odds ingestion run failure with stage and error details."""
+    finished_at = finished_at or datetime.now(timezone.utc)
+    row = connection.execute(
+        "SELECT CAST(started_at AS VARCHAR) FROM odds_ingestion_runs WHERE run_id = ?",
+        [run_id],
+    ).fetchone()
+    duration_ms = None
+    if row and row[0]:
+        started = datetime.fromisoformat(row[0].replace(" ", "T"))
+        duration_ms = (finished_at - started).total_seconds() * 1000.0
+
+    connection.execute(
+        """
+        UPDATE odds_ingestion_runs SET
+            status = 'FAILED',
+            failure_stage = ?,
+            error_message = ?,
+            finished_at = ?,
+            duration_ms = ?
+        WHERE run_id = ?
+        """,
+        [failure_stage, str(error_message), finished_at, duration_ms, run_id],
+    )
+
+
+def complete_empty_odds_ingestion_run(
+    connection: duckdb.DuckDBPyConnection,
+    run_id: str,
+    provider_key: str,
+    provider_event_ids: Iterable[str] = (),
+    *,
+    finished_at: datetime | None = None,
+) -> OddsIngestionRun:
+    """Mark an odds ingestion run with 0 records as COMPLETED."""
+    finished_at = finished_at or datetime.now(timezone.utc)
+    row = connection.execute(
+        "SELECT CAST(started_at AS VARCHAR) FROM odds_ingestion_runs WHERE run_id = ?",
+        [run_id],
+    ).fetchone()
+    started_at = datetime.fromisoformat(row[0].replace(" ", "T")) if row and row[0] else finished_at
+    duration_ms = (finished_at - started_at).total_seconds() * 1000.0
+    fingerprint = compute_odds_snapshots_fingerprint(provider_key, [])
+    event_ids = tuple(sorted(str(eid) for eid in provider_event_ids))
+    connection.execute(
+        """
+        UPDATE odds_ingestion_runs SET
+            status = 'COMPLETED',
+            provider_event_ids = ?,
+            input_fingerprint = ?,
+            records_fetched = 0,
+            records_parsed = 0,
+            records_inserted = 0,
+            records_updated = 0,
+            records_rejected = 0,
+            finished_at = ?,
+            duration_ms = ?,
+            retry_of_run_id = NULL,
+            is_retry = FALSE
+        WHERE run_id = ?
+        """,
+        [list(event_ids), fingerprint, finished_at, duration_ms, run_id],
+    )
+    return OddsIngestionRun(
+        run_id=run_id,
+        provider_key=provider_key,
+        provider_event_ids=event_ids,
+        input_fingerprint=fingerprint,
+        status="COMPLETED",
+        failure_stage=None,
+        error_message=None,
+        records_fetched=0,
+        records_parsed=0,
+        records_inserted=0,
+        records_updated=0,
+        records_rejected=0,
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_ms=duration_ms,
+        retry_of_run_id=None,
+        is_retry=False,
+    )
+
+
 def insert_odds_outcome_snapshots(
     connection: duckdb.DuckDBPyConnection,
     snapshots: Iterable[OddsOutcomeSnapshot],
@@ -923,7 +1106,7 @@ def insert_odds_outcome_snapshots(
                     fpl_player_id = COALESCE(
                         excluded.fpl_player_id, odds_outcome_snapshots.fpl_player_id
                     ),
-                    run_id = COALESCE(excluded.run_id, odds_outcome_snapshots.run_id);
+                    run_id = COALESCE(odds_outcome_snapshots.run_id, excluded.run_id);
                 """
             )
         finally:
@@ -956,18 +1139,37 @@ def store_odds_snapshot_bundle(
     records_parsed = len(snapshots_list)
     records_fetched = records_fetched if records_fetched is not None else records_parsed
 
-    fingerprint_raw = f"{provider_key}:{','.join(provider_event_ids)}:{records_parsed}"
-    input_fingerprint = hashlib.sha256(fingerprint_raw.encode()).hexdigest()[:16]
+    input_fingerprint = compute_odds_snapshots_fingerprint(provider_key, snapshots_list)
 
-    # Step 1: Pre-create RUNNING record (autocommit, survives subsequent rollbacks)
+    # Step 1: Pre-create or update RUNNING record (autocommit, survives subsequent rollbacks)
+    existing_started = connection.execute(
+        "SELECT CAST(started_at AS VARCHAR) FROM odds_ingestion_runs WHERE run_id = ?",
+        [run_id],
+    ).fetchone()
+    if existing_started and existing_started[0]:
+        started_at = datetime.fromisoformat(existing_started[0].replace(" ", "T"))
+
     connection.execute(
         """
         INSERT INTO odds_ingestion_runs (
             run_id, provider_key, provider_event_ids, input_fingerprint,
             status, failure_stage, error_message, records_fetched,
             records_parsed, records_inserted, records_updated, records_rejected,
-            started_at, finished_at, duration_ms
-        ) VALUES (?, ?, ?, ?, 'RUNNING', NULL, NULL, ?, ?, 0, 0, 0, ?, NULL, NULL)
+            started_at, finished_at, duration_ms, retry_of_run_id, is_retry
+        ) VALUES (?, ?, ?, ?, 'RUNNING', NULL, NULL, ?, ?, 0, 0, 0, ?, NULL, NULL, NULL, FALSE)
+        ON CONFLICT (run_id) DO UPDATE SET
+            provider_key = excluded.provider_key,
+            provider_event_ids = excluded.provider_event_ids,
+            input_fingerprint = excluded.input_fingerprint,
+            status = 'RUNNING',
+            failure_stage = NULL,
+            error_message = NULL,
+            records_fetched = excluded.records_fetched,
+            records_parsed = excluded.records_parsed,
+            records_inserted = 0,
+            records_updated = 0,
+            records_rejected = 0,
+            started_at = excluded.started_at
         """,
         [
             run_id,
@@ -1051,7 +1253,7 @@ def store_odds_snapshot_bundle(
                 f"""
                 SELECT count(*) FROM (
                     SELECT provider_key, provider_event_id, bookmaker_key, market_key,
-                           market_ordinal, outcome_ordinal, captured_at
+                            market_ordinal, outcome_ordinal, captured_at
                     FROM {stage_table}
                     GROUP BY 1, 2, 3, 4, 5, 6, 7
                     HAVING count(*) > 1
@@ -1108,7 +1310,7 @@ def store_odds_snapshot_bundle(
                     fpl_player_id = COALESCE(
                         excluded.fpl_player_id, odds_outcome_snapshots.fpl_player_id
                     ),
-                    run_id = COALESCE(excluded.run_id, odds_outcome_snapshots.run_id);
+                    run_id = COALESCE(odds_outcome_snapshots.run_id, excluded.run_id);
                 """
             )
             connection.execute(f"DROP TABLE {stage_table}")
@@ -1120,6 +1322,50 @@ def store_odds_snapshot_bundle(
             upsert_odds_bookmakers(connection, bookmakers_list)
             records_inserted = 0
             records_updated = 0
+
+        # Check for retry of prior run
+        retry_of_run_id: str | None = None
+        is_retry: bool = False
+        earlier_run = connection.execute(
+            """
+            SELECT run_id FROM odds_ingestion_runs
+            WHERE input_fingerprint = ? AND status = 'COMPLETED' AND run_id != ?
+            ORDER BY started_at ASC LIMIT 1
+            """,
+            [input_fingerprint, run_id],
+        ).fetchone()
+        if earlier_run:
+            retry_of_run_id = earlier_run[0]
+            is_retry = True
+        elif snapshots_list and records_inserted == 0 and records_updated == len(snapshots_list):
+            owner_row = connection.execute(
+                """
+                SELECT run_id FROM odds_outcome_snapshots
+                WHERE provider_key = ?
+                  AND provider_event_id = ?
+                  AND bookmaker_key = ?
+                  AND market_key = ?
+                  AND market_ordinal = ?
+                  AND outcome_ordinal = ?
+                  AND captured_at = ?
+                  AND run_id IS NOT NULL
+                  AND run_id != ?
+                LIMIT 1
+                """,
+                [
+                    snapshots_list[0].provider_key,
+                    snapshots_list[0].provider_event_id,
+                    snapshots_list[0].bookmaker_key,
+                    snapshots_list[0].market_key,
+                    snapshots_list[0].market_ordinal,
+                    snapshots_list[0].outcome_ordinal,
+                    snapshots_list[0].captured_at,
+                    run_id,
+                ],
+            ).fetchone()
+            if owner_row:
+                retry_of_run_id = owner_row[0]
+                is_retry = True
 
         # Mark COMPLETED inside transaction
         failure_stage = "commit"
@@ -1134,10 +1380,12 @@ def store_odds_snapshot_bundle(
                 records_updated = ?,
                 records_rejected = 0,
                 finished_at = ?,
-                duration_ms = ?
+                duration_ms = ?,
+                retry_of_run_id = ?,
+                is_retry = ?
             WHERE run_id = ?
             """,
-            [records_inserted, records_updated, finished_at, duration_ms, run_id],
+            [records_inserted, records_updated, finished_at, duration_ms, retry_of_run_id, is_retry, run_id],
         )
         connection.execute("COMMIT")
 
@@ -1157,6 +1405,8 @@ def store_odds_snapshot_bundle(
             started_at=started_at,
             finished_at=finished_at,
             duration_ms=duration_ms,
+            retry_of_run_id=retry_of_run_id,
+            is_retry=is_retry,
         )
     except Exception as exc:
         connection.execute("ROLLBACK")
@@ -1188,7 +1438,8 @@ def load_odds_ingestion_run(
             run_id, provider_key, provider_event_ids, input_fingerprint,
             status, failure_stage, error_message, records_fetched,
             records_parsed, records_inserted, records_updated, records_rejected,
-            CAST(started_at AS VARCHAR), CAST(finished_at AS VARCHAR), duration_ms
+            CAST(started_at AS VARCHAR), CAST(finished_at AS VARCHAR), duration_ms,
+            retry_of_run_id, is_retry
         FROM odds_ingestion_runs
         WHERE run_id = ?
         """,
@@ -1212,45 +1463,12 @@ def load_odds_ingestion_run(
         started_at=datetime.fromisoformat(row[12].replace(" ", "T")) if row[12] else None,
         finished_at=datetime.fromisoformat(row[13].replace(" ", "T")) if row[13] else None,
         duration_ms=row[14],
+        retry_of_run_id=row[15],
+        is_retry=bool(row[16]) if row[16] is not None else False,
     )
 
 
-def latest_odds_snapshot_provenance(
-    connection: duckdb.DuckDBPyConnection, fixture_fpl_id: int, provider_key: str = "propline"
-) -> tuple[tuple[str, ...], datetime, datetime, int]:
-    """Return the latest raw market snapshot groups feeding a fixture consensus."""
-    rows = connection.execute(
-        """
-        WITH latest AS (
-            SELECT
-                s.provider_event_id, s.bookmaker_key, s.market_key, s.market_ordinal,
-                max(s.captured_at) AS captured_at
-            FROM odds_outcome_snapshots AS s
-            JOIN odds_event_fixture_mappings AS m
-              ON m.provider_key = s.provider_key
-             AND m.provider_event_id = s.provider_event_id
-            WHERE s.provider_key = ?
-              AND m.fpl_fixture_id = ?
-              AND s.market_key IN (?, ?, ?)
-            GROUP BY ALL
-        )
-        SELECT provider_event_id, CAST(captured_at AS VARCHAR) AS captured_at
-        FROM latest
-        """,
-        [provider_key, fixture_fpl_id, "h2h", "totals", "both_teams_to_score"],
-    ).fetchall()
-    if not rows:
-        raise ValueError(f"no odds snapshot provenance for fixture {fixture_fpl_id}")
-    captured_at = [
-        datetime.fromisoformat(str(row[1]).replace("Z", "+00:00"))
-        for row in rows
-    ]
-    return (
-        tuple(sorted({str(row[0]) for row in rows})),
-        min(captured_at),
-        max(captured_at),
-        len(rows),
-    )
+from .markets import latest_odds_snapshot_provenance
 
 
 def insert_team_goal_projection(
