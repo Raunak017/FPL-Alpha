@@ -17,6 +17,9 @@ updates. Add an entry here before committing related work.
 
 - `latest_odds_snapshot_provenance` unified with `consensus_from_latest_odds` to use identical eligible market criteria (completed runs, full books, primary 2.5 totals) and filter out consensus outlier bookmaker observations.
 - Ingestion run lifecycle handling guarantees durable `FAILED` records with specific failure-stage details whenever an exception occurs after run initialization, preventing orphaned `RUNNING` records.
+- Enforced terminal ingestion run statuses (`COMPLETED` and `FAILED`), prohibiting later lifecycle operations from resetting or overwriting finished runs.
+- Prevented unconditional transaction rollbacks in `fail_odds_ingestion_run`, isolating failure reporting from unrelated caller transactions.
+- Preserved original `started_at` when `store_odds_snapshot_bundle()` receives an existing `RUNNING` `run_id`, ensuring recorded run duration covers fetching, normalization, and persistence.
 
 ## 2026-10-12
 

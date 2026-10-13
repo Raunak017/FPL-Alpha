@@ -15,6 +15,7 @@ from fpl_alpha.schemas import (
 )
 from fpl_alpha.storage import (
     IngestionValidationError,
+    complete_empty_odds_ingestion_run,
     compute_odds_snapshots_fingerprint,
     fail_odds_ingestion_run,
     latest_odds_snapshot_provenance,
@@ -878,3 +879,133 @@ def test_team_xg_provenance_reflects_retained_books_after_outlier_rejection(tmp_
         assert persisted[1] == t_base
     finally:
         connection.close()
+
+
+def test_terminal_statuses_never_reset_or_overwritten(tmp_path):
+    connection = open_database(tmp_path / "test.duckdb")
+    try:
+        _setup_fixture(connection)
+
+        # 1. Test COMPLETED run cannot be restarted, refailed, or re-completed
+        run_c = start_odds_ingestion_run(connection, "propline")
+        complete_empty_odds_ingestion_run(connection, run_c.run_id, "propline")
+        assert load_odds_ingestion_run(connection, run_c.run_id).status == "COMPLETED"
+
+        with pytest.raises(RuntimeError, match="terminal"):
+            start_odds_ingestion_run(connection, "propline", run_id=run_c.run_id)
+
+        with pytest.raises(RuntimeError, match="terminal"):
+            complete_empty_odds_ingestion_run(connection, run_c.run_id, "propline")
+
+        with pytest.raises(RuntimeError, match="terminal"):
+            store_odds_snapshot_bundle(
+                connection, "propline", [], [], [], [], [], run_id=run_c.run_id
+            )
+
+        # fail_odds_ingestion_run must NOT overwrite a COMPLETED run
+        fail_odds_ingestion_run(connection, run_c.run_id, "late_stage", "late_error")
+        assert load_odds_ingestion_run(connection, run_c.run_id).status == "COMPLETED"
+
+        # 2. Test FAILED run cannot be restarted, completed, or have its failure overwritten
+        run_f = start_odds_ingestion_run(connection, "propline")
+        fail_odds_ingestion_run(connection, run_f.run_id, "orig_stage", "orig_error")
+        record_f = load_odds_ingestion_run(connection, run_f.run_id)
+        assert record_f.status == "FAILED"
+        assert record_f.failure_stage == "orig_stage"
+
+        with pytest.raises(RuntimeError, match="terminal"):
+            start_odds_ingestion_run(connection, "propline", run_id=run_f.run_id)
+
+        with pytest.raises(RuntimeError, match="terminal"):
+            complete_empty_odds_ingestion_run(connection, run_f.run_id, "propline")
+
+        with pytest.raises(RuntimeError, match="terminal"):
+            store_odds_snapshot_bundle(
+                connection, "propline", [], [], [], [], [], run_id=run_f.run_id
+            )
+
+        # Later fail call must NOT overwrite original failure stage
+        fail_odds_ingestion_run(connection, run_f.run_id, "later_stage", "later_error")
+        record_f_later = load_odds_ingestion_run(connection, run_f.run_id)
+        assert record_f_later.status == "FAILED"
+        assert record_f_later.failure_stage == "orig_stage"
+    finally:
+        connection.close()
+
+
+def test_failure_handling_does_not_unconditionally_rollback_unrelated_transaction(tmp_path):
+    connection = open_database(tmp_path / "test.duckdb")
+    try:
+        _setup_fixture(connection)
+
+        # Begin unrelated caller transaction
+        connection.execute("BEGIN TRANSACTION")
+        connection.execute(
+            """
+            INSERT INTO teams (fpl_id, name, short_name, aliases)
+            VALUES (999, 'Unrelated FC', 'UFC', [])
+            """
+        )
+
+        # An odds ingestion failure occurs
+        run = start_odds_ingestion_run(connection, "propline")
+        fail_odds_ingestion_run(connection, run.run_id, "fetch_stage", "fetch_error")
+
+        # The unrelated caller transaction must still be able to commit
+        connection.execute("COMMIT")
+
+        team_row = connection.execute(
+            "SELECT name FROM teams WHERE fpl_id = 999"
+        ).fetchone()
+        assert team_row is not None
+        assert team_row[0] == "Unrelated FC"
+
+        failed_run = load_odds_ingestion_run(connection, run.run_id)
+        assert failed_run.status == "FAILED"
+        assert failed_run.failure_stage == "fetch_stage"
+    finally:
+        connection.close()
+
+
+def test_store_bundle_preserves_original_started_at_and_duration_for_running_run(tmp_path):
+    connection = open_database(tmp_path / "test.duckdb")
+    try:
+        _setup_fixture(connection)
+        t0 = datetime(2026, 8, 20, 10, 0, 0, tzinfo=timezone.utc)
+
+        # Pre-start run at t0 (representing when fetching started)
+        run_record = start_odds_ingestion_run(connection, "propline", started_at=t0)
+        assert run_record.started_at == t0
+
+        now = datetime(2026, 8, 20, 10, 0, 10, tzinfo=timezone.utc)
+        events, mappings, player_mappings, bookmakers, snapshots = _sample_bundle(now, count=5)
+
+        # store_odds_snapshot_bundle receives the existing RUNNING run_id
+        completed_run = store_odds_snapshot_bundle(
+            connection,
+            "propline",
+            events,
+            mappings,
+            player_mappings,
+            bookmakers,
+            snapshots,
+            run_id=run_record.run_id,
+        )
+
+        assert completed_run.run_id == run_record.run_id
+        assert completed_run.status == "COMPLETED"
+        assert completed_run.started_at == t0
+        # Duration must span from t0, not from when store_odds_snapshot_bundle was called
+        expected_min_duration_ms = (completed_run.finished_at - t0).total_seconds() * 1000.0
+        assert completed_run.duration_ms >= expected_min_duration_ms - 50.0
+
+        persisted = connection.execute(
+            "SELECT status, CAST(started_at AS VARCHAR), duration_ms FROM odds_ingestion_runs WHERE run_id = ?",
+            [run_record.run_id],
+        ).fetchone()
+        assert persisted[0] == "COMPLETED"
+        assert "10:00:00" in persisted[1] or "06:00:00" in persisted[1]  # UTC or local offset
+        assert persisted[2] == completed_run.duration_ms
+    finally:
+        connection.close()
+

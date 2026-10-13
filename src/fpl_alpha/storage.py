@@ -912,25 +912,49 @@ def start_odds_ingestion_run(
     started_at: datetime | None = None,
 ) -> OddsIngestionRun:
     """Pre-create or register a RUNNING odds ingestion run record in DuckDB."""
-    started_at = started_at or datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    started_at = started_at or now
     run_id = run_id or f"run_{started_at.strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
     event_ids = tuple(sorted(str(eid) for eid in provider_event_ids))
-    connection.execute(
-        """
-        INSERT INTO odds_ingestion_runs (
-            run_id, provider_key, provider_event_ids, input_fingerprint,
-            status, failure_stage, error_message, records_fetched,
-            records_parsed, records_inserted, records_updated, records_rejected,
-            started_at, finished_at, duration_ms, retry_of_run_id, is_retry
-        ) VALUES (?, ?, ?, NULL, 'RUNNING', NULL, NULL, 0, 0, 0, 0, 0, ?, NULL, NULL, NULL, FALSE)
-        ON CONFLICT (run_id) DO UPDATE SET
-            provider_key = excluded.provider_key,
-            provider_event_ids = excluded.provider_event_ids,
-            status = 'RUNNING',
-            started_at = excluded.started_at
-        """,
-        [run_id, provider_key, list(event_ids), started_at],
-    )
+
+    row = connection.execute(
+        "SELECT status, CAST(started_at AS VARCHAR), provider_event_ids FROM odds_ingestion_runs WHERE run_id = ?",
+        [run_id],
+    ).fetchone()
+
+    if row is not None:
+        existing_status, existing_started_str, existing_events = row[0], row[1], row[2]
+        if existing_status in ("COMPLETED", "FAILED"):
+            raise RuntimeError(
+                f"Cannot restart terminal odds ingestion run {run_id} with status {existing_status}"
+            )
+        # Preserve original started_at for existing RUNNING run
+        if existing_started_str:
+            started_at = datetime.fromisoformat(existing_started_str.replace(" ", "T"))
+        merged_events = tuple(sorted(set(existing_events or ()).union(event_ids))) if event_ids else tuple(existing_events or ())
+        connection.execute(
+            """
+            UPDATE odds_ingestion_runs SET
+                provider_key = ?,
+                provider_event_ids = ?
+            WHERE run_id = ?
+            """,
+            [provider_key, list(merged_events), run_id],
+        )
+        event_ids = merged_events
+    else:
+        connection.execute(
+            """
+            INSERT INTO odds_ingestion_runs (
+                run_id, provider_key, provider_event_ids, input_fingerprint,
+                status, failure_stage, error_message, records_fetched,
+                records_parsed, records_inserted, records_updated, records_rejected,
+                started_at, finished_at, duration_ms, retry_of_run_id, is_retry
+            ) VALUES (?, ?, ?, NULL, 'RUNNING', NULL, NULL, 0, 0, 0, 0, 0, ?, NULL, NULL, NULL, FALSE)
+            """,
+            [run_id, provider_key, list(event_ids), started_at],
+        )
+
     return OddsIngestionRun(
         run_id=run_id,
         provider_key=provider_key,
@@ -959,13 +983,15 @@ def fail_odds_ingestion_run(
     error_message: str,
     *,
     finished_at: datetime | None = None,
+    rollback: bool = False,
 ) -> None:
     """Record an odds ingestion run failure with stage and error details."""
     finished_at = finished_at or datetime.now(timezone.utc)
-    try:
-        connection.execute("ROLLBACK")
-    except Exception:
-        pass
+    if rollback:
+        try:
+            connection.execute("ROLLBACK")
+        except Exception:
+            pass
 
     row = connection.execute(
         "SELECT status, CAST(started_at AS VARCHAR) FROM odds_ingestion_runs WHERE run_id = ?",
@@ -974,7 +1000,7 @@ def fail_odds_ingestion_run(
     if not row:
         return
     status, started_str = row[0], row[1]
-    if status == "FAILED":
+    if status in ("COMPLETED", "FAILED"):
         return
 
     duration_ms = None
@@ -1007,10 +1033,18 @@ def complete_empty_odds_ingestion_run(
     """Mark an odds ingestion run with 0 records as COMPLETED."""
     finished_at = finished_at or datetime.now(timezone.utc)
     row = connection.execute(
-        "SELECT CAST(started_at AS VARCHAR) FROM odds_ingestion_runs WHERE run_id = ?",
+        "SELECT status, CAST(started_at AS VARCHAR) FROM odds_ingestion_runs WHERE run_id = ?",
         [run_id],
     ).fetchone()
-    started_at = datetime.fromisoformat(row[0].replace(" ", "T")) if row and row[0] else finished_at
+    if not row:
+        raise RuntimeError(f"Odds ingestion run {run_id} does not exist")
+    status, started_str = row[0], row[1]
+    if status in ("COMPLETED", "FAILED"):
+        raise RuntimeError(
+            f"Cannot complete terminal odds ingestion run {run_id} with status {status}"
+        )
+
+    started_at = datetime.fromisoformat(started_str.replace(" ", "T")) if started_str else finished_at
     duration_ms = (finished_at - started_at).total_seconds() * 1000.0
     fingerprint = compute_odds_snapshots_fingerprint(provider_key, [])
     event_ids = tuple(sorted(str(eid) for eid in provider_event_ids))
@@ -1163,9 +1197,10 @@ def store_odds_snapshot_bundle(
     run_id = run_id or f"run_{started_at.strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
 
     # Step 1: Pre-create or ensure RUNNING record in DuckDB immediately
-    start_odds_ingestion_run(
+    run_record = start_odds_ingestion_run(
         connection, provider_key=provider_key, run_id=run_id, started_at=started_at
     )
+    started_at = run_record.started_at
 
     stage_table: str | None = None
     failure_stage = "prepare_inputs"
