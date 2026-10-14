@@ -50,6 +50,8 @@ def consensus(
     market: str,
     outcomes: Sequence[str],
     books: Sequence[Sequence[float]],
+    *,
+    exclude_outliers: bool = True,
 ) -> list[MarketProb]:
     """Combine de-vigged probabilities across multiple books into consensus
     MarketProb records.
@@ -66,7 +68,8 @@ def consensus(
     """
     if not books:
         raise ValueError("no books supplied")
-    per_book = [devig_proportional(row) for row in _exclude_outlier_books(books)]
+    filtered_books = _exclude_outlier_books(books) if exclude_outliers else books
+    per_book = [devig_proportional(row) for row in filtered_books]
     n = len(per_book)
     centers = [sum(book[i] for book in per_book) / n for i in range(len(outcomes))]
     total = sum(centers)
@@ -79,14 +82,14 @@ def consensus(
     ]
 
 
-def _exclude_outlier_books(books: Sequence[Sequence[float]]) -> list[Sequence[float]]:
-    """Remove only material robust-MAD price outliers.
+def _retained_book_indices(books: Sequence[Sequence[float]]) -> list[int]:
+    """Return indices of books retained after removing material robust-MAD price outliers.
 
     Fewer than three complete books have no defensible cross-book baseline.
     A rejected book is removed for every outcome in its market.
     """
     if len(books) < 3:
-        return list(books)
+        return list(range(len(books)))
 
     fair_books = [devig_proportional(book) for book in books]
     rejected: set[int] = set()
@@ -101,8 +104,14 @@ def _exclude_outlier_books(books: Sequence[Sequence[float]]) -> list[Sequence[fl
             if mad == 0 or 0.67449 * deviation / mad > 3.5:
                 rejected.add(book_index)
 
-    retained = [book for index, book in enumerate(books) if index not in rejected]
-    return retained if len(retained) >= 2 else list(books)
+    retained = [index for index in range(len(books)) if index not in rejected]
+    return retained if len(retained) >= 2 else list(range(len(books)))
+
+
+def _exclude_outlier_books(books: Sequence[Sequence[float]]) -> list[Sequence[float]]:
+    """Remove only material robust-MAD price outliers."""
+    retained_indices = _retained_book_indices(books)
+    return [books[i] for i in retained_indices]
 
 
 def _logit(probability: float) -> float:
@@ -233,12 +242,16 @@ def _eligible_market_books_and_provenance(
             if not market.startswith("totals_") or market == primary_total
         }
 
-    eligible_provenance: list[tuple[str, datetime]] = [
-        book_meta[book_key]
-        for book_keys in market_books.values()
-        for book_key in book_keys
-    ]
-    return grouped, eligible_provenance
+    retained_grouped: dict[str, list[list[float]]] = {}
+    eligible_provenance: list[tuple[str, datetime]] = []
+    for market, book_rows in sorted(grouped.items()):
+        retained_indices = _retained_book_indices(book_rows)
+        retained_grouped[market] = [book_rows[i] for i in retained_indices]
+        for i in retained_indices:
+            book_key = market_books[market][i]
+            eligible_provenance.append(book_meta[book_key])
+
+    return retained_grouped, eligible_provenance
 
 
 def consensus_from_latest_odds(
@@ -254,7 +267,13 @@ def consensus_from_latest_odds(
     return [
         probability
         for market, book_rows in sorted(grouped.items())
-        for probability in consensus(str(fixture_fpl_id), market, _market_outcome_order(market) or (), book_rows)
+        for probability in consensus(
+            str(fixture_fpl_id),
+            market,
+            _market_outcome_order(market) or (),
+            book_rows,
+            exclude_outliers=False,
+        )
     ]
 
 
