@@ -24,12 +24,15 @@ _POSITION = {1: "GKP", 2: "DEF", 3: "MID", 4: "FWD"}
 # Common provider forms for the FPL team labels. These are deliberately
 # explicit: odds-event matching must not guess between similarly named teams.
 _TEAM_ALIASES = {
-    "brighton": ("Brighton and Hove Albion",),
+    "brighton": ("Brighton and Hove Albion", "Brighton & Hove Albion"),
+    "coventry city": ("Coventry",),
+    "hull city": ("Hull",),
+    "ipswich town": ("Ipswich",),
     "man city": ("Manchester City",),
     "man utd": ("Manchester United", "Man United"),
     "leeds": ("Leeds United",),
     "newcastle": ("Newcastle United",),
-    "nott m forest": ("Nottingham Forest",),
+    "nott m forest": ("Nottingham Forest", "Nottm Forest"),
     "spurs": ("Tottenham", "Tottenham Hotspur"),
     "wolves": ("Wolverhampton Wanderers",),
 }

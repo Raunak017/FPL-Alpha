@@ -21,10 +21,10 @@ call `urllib`/`requests` directly from a stage; never add a call that bypasses
 
 ### Odds Architecture: PropLine (Primary) → DuckDB → Consensus
 The primary operational odds pipeline is:
-1. Ingest PropLine odds cache-first via `scripts/refresh_propline_odds.py`.
+1. Ingest PropLine odds cache-first via `scripts/refresh_upcoming_propline_odds.py` or `scripts/refresh_propline_odds.py`.
 2. Persist normalized records to DuckDB (`odds_outcome_snapshots`, `odds_event_fixture_mappings`, etc.).
 3. Form robust consensus probabilities via `markets.consensus_from_latest_odds()`.
-4. Fit Poisson team goals via `team_xg.fit_and_persist_fixture_team_xg()` into DuckDB (`fixture_team_xg`).
+4. Fit Poisson team goals via `team_xg.fit_and_persist_fixture_team_xg()` / `build_and_persist_team_goal_projection()` into DuckDB.
 
 ### The Odds API — Secondary / Fallback Source
 The Odds API (`the_odds_api_epl`, `scripts/snapshot_odds.py`) is maintained as a secondary/fallback source. Handle its budget with care:
@@ -57,12 +57,6 @@ markets like player props quoted by only 2–3 US books.
 - `bootstrap-static` already includes xG/xA/xGI, expected goals conceded, defensive
   contributions, prices, ownership, status/news — so **prefer it over scraping Understat/FBref**.
 
-### Official FPL API (no key, but still be polite)
-- Not formally documented; no published rate limit, but the endpoint **can soft-ban an IP**
-  that hammers it. Keep it to **≤ ~1 req/sec**, send a real `User-Agent`, and cache.
-- `bootstrap-static` already includes xG/xA/xGI, expected goals conceded, defensive
-  contributions, prices, ownership, status/news — so **prefer it over scraping Understat/FBref**.
-
 ## Developers (2)
 
 - **dev1 — Rushi Pardeshi.** FPL Team ID `432989` (team name "KanteGetAnyWorse", USA).
@@ -78,8 +72,36 @@ markets like player props quoted by only 2–3 US books.
 | Manager squad/history | `/api/entry/{id}/`, `/history/`, `/event/{gw}/picks/` | none (public by Team ID) | ✅ (picks public only after a GW locks) |
 | Football xG stats | FPL bootstrap (primary); FBref (secondary) | none | ✅ FPL / ⚠️ FBref scrape with care |
 | Understat xG | understat.com | none | ⛔ anti-bot gated now |
-| Betting odds (Primary: match & props) | PropLine (via `refresh_propline_odds.py` → DuckDB) | none / cached | ✅ working — match & props in DuckDB |
-| Betting odds (Secondary / fallback) | The Odds API (`soccer_epl`, featured `/odds`) | **API key** (`ODDS_API_KEY`) | ✅ working — secondary/fallback feed |
+| Betting odds (Primary: match & props) | PropLine (via `refresh_upcoming_propline_odds.py` → DuckDB) | `PROPLINE_API_KEY` | ✅ cache-first EPL ingestion |
+| Betting odds (Secondary / fallback) | The Odds API (`soccer_epl`, featured `/odds`) | **API key** (`ODDS_API_KEY`) | ✅ secondary/fallback feed |
+
+## Layout
+
+```
+FPL-Alpha/
+├── CLAUDE.md                 # this file
+├── README.md  AGENTS.md      # quickstart / working conventions
+├── pyproject.toml
+├── .env / .env.example       # secrets + team IDs (.env gitignored)
+├── .gitignore
+│
+├── src/fpl_alpha/
+│   ├── config.py             # env + paths + per-provider rate-limit budgets
+│   ├── cache.py              # cache-first, throttled HTTP gateway (the one choke point)
+│   ├── snapshots.py          # timestamped odds/FPL captures + manifest
+│   ├── schemas.py            # typed data contracts between pipeline stages
+│   ├── ingestion/            # fpl.py · odds.py · stats.py            (steps 1–2)
+│   ├── identity.py           # canonical FPL ids + odds-name matching  (identity layer)
+│   ├── markets.py            # de-vig + consensus                      (step 3)
+│   ├── team_xg.py            # market-implied Poisson team goals       (step 4)
+│   └── models/               # player-level models                    (steps 5+, empty)
+│
+├── scripts/                  # refresh_fpl.py · refresh_upcoming_propline_odds.py
+├── tests/                    # pytest (no-vig math covered)
+├── notebooks/
+├── docs/                     # PROJECT_PLAN.md (the 12-step roadmap)
+└── data/{raw,processed,snapshots}/   # cached API JSON (gitignored)
+```
 
 Downstream stages (`simulation`, `scoring`, `projections`, `optimization`,
 `evaluation`) are added when reached — the plan reserves the names, but empty
@@ -93,13 +115,14 @@ pip install -e ".[dev]"
 cp .env.example .env          # add keys / team ids as available
 
 python scripts/refresh_fpl.py         # cache FPL bootstrap + fixtures (cache-first)
-python scripts/snapshot_odds.py \
-    --scope epl-gw1 --captured-at 2026-08-21T17:30:00Z   # scheduled odds snapshot
+python scripts/refresh_upcoming_propline_odds.py  # mapped upcoming EPL odds
+# Or fallback scheduled snapshot:
+python scripts/snapshot_odds.py --scope epl-gw1 --captured-at 2026-08-21T17:30:00Z
 pytest                                 # runs the no-vig math tests
 ```
 
 `refresh_fpl.py` does nothing over the wire if the cache is still fresh; pass
-`--force` to bypass the TTL. Run odds snapshots on a schedule, never in a loop.
+`--force` to bypass the TTL. PropLine refreshes are cache-first; never poll in a loop.
 
 **Whenever a new script is added to `scripts/`, update the Scripts table in
 [`README.md`](README.md)** (and its Quickstart if the script belongs there)

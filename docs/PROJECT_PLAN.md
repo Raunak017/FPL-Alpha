@@ -9,10 +9,9 @@ Build a market-informed FPL projection and optimization engine that combines off
 > allocation blocker, and why odds and FPL data are complementary (backward rates
 > vs. forward fixture-specific expectations).
 
-## Status (as of 2026-09-13)
+## Status (as of 2026-10-13)
 
-PropLine odds ingestion is complete (steps 1–3) with robust outlier handling,
- DuckDB persistence, and exact player mapping.
+Steps **1–4** are code-complete with robust outlier handling, DuckDB persistence, exact player mapping, and automated batch builders for mapped upcoming fixtures (`build_upcoming_team_xg.py` / `fit_team_xg.py`).
 Additionally, player-level work has begun: steps **5–7** now have a baseline **historical-shares allocator**
 (`allocation.py`) — splitting market team xG into per-player xG/xA — plus an
 **expected-minutes model** (`minutes.py`) with empirical-Bayes shrinkage that gates
@@ -113,6 +112,20 @@ by home team, away team, and kickoff; player props are fixture-team-scoped and
 use explicit aliases or strict normalization, leaving unresolved labels `NULL`.
 The Odds API is maintained as a secondary/fallback source.*
 
+Legacy SportsGameOdds and The Odds API clients have been removed; PropLine is
+the sole odds source and uses `PROPLINE_API_KEY`.
+
+#### Refresh all mapped upcoming PropLine fixtures
+
+```bash
+PYTHONPATH=src python scripts/refresh_upcoming_propline_odds.py
+```
+
+The command first performs the normal cache-first FPL refresh, discovers current
+PropLine EPL events, strictly maps them to future FPL fixtures, then captures all
+supported markets in one DuckDB transaction. Use `--gameweek <N>` to narrow the
+scope or `--force` to bypass only the PropLine cache TTL.
+
 ### 3. No-Vig Market Probabilities — ✅ done
 Convert bookmaker odds into fair probabilities by:
 
@@ -137,7 +150,16 @@ Use match markets to estimate:
 ✅ Poisson-based baseline model (independent Poisson; fit by coordinate descent + golden-section, pure stdlib).
 ✅ Step 4 operational flow: DuckDB consensus → `fit_team_goals()` → persisted team-xG (`fixture_team_xg`) with market provenance & fit residuals (`scripts/fit_team_xg.py` / `team_xg.fit_and_persist_fixture_team_xg`).
 
-*Implemented in `src/fpl_alpha/team_xg.py`; tested in `tests/test_team_xg.py`. Planned refinement (not blocking): Dixon–Coles low-score correction.*
+*Implemented in `src/fpl_alpha/team_xg.py`; tested in `tests/test_team_xg.py` and `tests/test_live_team_xg_projection.py`. `scripts/build_team_xg.py --fixture-id <fpl_fixture_id>` / `scripts/fit_team_xg.py` reads the latest DuckDB market consensus, fits team xG, and persists `team_goal_model_snapshots` and `fixture_team_xg`. Planned refinement (not blocking): Dixon–Coles low-score correction.*
+
+Build every mapped upcoming fixture with stored PropLine odds using:
+
+```bash
+PYTHONPATH=src python scripts/build_upcoming_team_xg.py
+```
+
+It prints each fixture with a complete consensus and persisted team-xG projection,
+plus fixtures skipped because their latest bookmaker odds are incomplete.
 
 ### 5. Player Goal Probabilities — 🟡 partial [remaining: calibrate priors; emit goal-prob field; player-prop source]
 Use team xG and per-player shares to estimate:
@@ -246,7 +268,7 @@ Start with Steps **1–4**:
 3. ✅ Fair market probabilities
 4. ✅ Market-implied team xG
 
-The step 3→4 chain runs today via `scripts/demo_market_to_xg.py` (offline example odds). PropLine now supplies live cached and persisted odds; connecting those DuckDB snapshots to the consensus and team-xG stages is separate follow-on work. Then move into player-level projections.
+The live Step 3→4 chain runs via `scripts/build_team_xg.py --fixture-id <fpl_fixture_id>`; the offline demo remains available for illustration. Then move into player-level projections.
 
 ## High-Level Architecture
 

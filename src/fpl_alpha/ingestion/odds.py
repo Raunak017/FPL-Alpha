@@ -1,25 +1,16 @@
 """Betting-odds clients (Plan step 2).
 
-
-⚠️ Rate limits are the tightest constraint in this repo (see CLAUDE.md):
-  - The Odds API bills credits = #markets x #regions per call (x10 for
-    historical). The ~500-credit/mo free tier is easy to blow through.
-All calls go through cache.fetch (throttled + credit-tracked via the
-``x-requests-*`` response headers). For scheduled captures, wrap the return
-value with snapshots.write_snapshot so line movement is recoverable.
-
 Status:
 PropLine EPL ingestion is cache-first and persists normalized outcomes in
-DuckDB; older provider clients (The Odds API) remain available for their
-existing workflows but are no longer the primary path.
-
+DuckDB; older provider clients (The Odds API) remain available as a secondary/fallback
+feed for their existing workflows.
 """
 from __future__ import annotations
 
 import urllib.parse
 from collections import Counter
 from datetime import datetime
-from typing import Any
+from typing import Any, Iterable
 
 from ..cache import fetch
 from ..config import (
@@ -51,7 +42,17 @@ PROPLINE_EPL_MARKETS = (
 PROPLINE_PLAYER_PROP_MARKETS = {"anytime_goal_scorer", "player_assists"}
 # Provider spelling -> (FPL player ID, required FPL team ID). Keep aliases
 # narrow and fixture-scoped; unmatched labels are safer than guessed matches.
-_PROPLINE_PLAYER_ALIASES = {"calvin ramsey": (365, 14)}
+_PROPLINE_PLAYER_ALIASES = {
+    "ben white": (10, 1),
+    "ephron mason clarke": (186, 7),
+    "ferdi kadioglu": (113, 5),
+    "jair": (474, 18),
+    "kaine kessler": (177, 7),
+    "savinho": (403, 19),
+    "yegor yarmolyuk": (102, 4),
+    "yehor yarmolyuk": (102, 4),
+    "calvin ramsey": (365, 14),
+}
 
 
 def the_odds_api_epl(
@@ -200,6 +201,18 @@ def propline_epl_event_odds_cache_key(event_id: str, markets: tuple[str, ...]) -
     return f"propline-epl-event-{event_id}-{'-'.join(markets)}"
 
 
+def propline_event_from_payload(payload: dict[str, Any]) -> OddsProviderEvent:
+    """Normalize one PropLine event-list or odds-response identity."""
+    return OddsProviderEvent(
+        provider_key="propline",
+        provider_event_id=str(payload["id"]),
+        sport_key=payload["sport_key"],
+        home_team=payload["home_team"],
+        away_team=payload["away_team"],
+        commence_time=payload["commence_time"],
+    )
+
+
 def normalize_propline_event_odds(
     payload: dict[str, Any],
     teams: list[Team],
@@ -214,15 +227,8 @@ def normalize_propline_event_odds(
     list[OddsOutcomeSnapshot],
 ]:
     """Normalize one PropLine event response and map it to an FPL fixture."""
-    event = OddsProviderEvent(
-        provider_key="propline",
-        provider_event_id=str(payload["id"]),
-        sport_key=payload["sport_key"],
-        home_team=payload["home_team"],
-        away_team=payload["away_team"],
-        commence_time=payload["commence_time"],
-    )
-    fixture = _map_propline_event_to_fixture(event, teams, fixtures)
+    event = propline_event_from_payload(payload)
+    fixture = map_propline_event_to_fixture(event, teams, fixtures)
     mapping = OddsEventFixtureMapping(
         provider_key=event.provider_key,
         provider_event_id=event.provider_event_id,
@@ -276,7 +282,7 @@ def normalize_propline_event_odds(
     return event, mapping, list(player_mappings.values()), bookmakers, snapshots
 
 
-def _map_propline_event_to_fixture(
+def map_propline_event_to_fixture(
     event: OddsProviderEvent, teams: list[Team], fixtures: list[Fixture]
 ) -> Fixture | None:
     home_match = match_odds_name_strict(event.home_team, teams)
@@ -296,6 +302,35 @@ def _map_propline_event_to_fixture(
         and _same_time(fixture.kickoff_time, event.commence_time)
     ]
     return matches[0] if len(matches) == 1 else None
+
+
+def mapped_upcoming_propline_events(
+    payloads: Iterable[dict[str, Any]],
+    teams: list[Team],
+    fixtures: list[Fixture],
+    now: datetime,
+    gameweek: int | None = None,
+) -> tuple[list[tuple[OddsProviderEvent, Fixture]], list[OddsProviderEvent], list[OddsProviderEvent]]:
+    """Strictly classify current provider events against upcoming FPL fixtures."""
+    selected: list[tuple[OddsProviderEvent, Fixture]] = []
+    unmapped: list[OddsProviderEvent] = []
+    skipped: list[OddsProviderEvent] = []
+    for payload in payloads:
+        event = propline_event_from_payload(payload)
+        fixture = map_propline_event_to_fixture(event, teams, fixtures)
+        if fixture is None:
+            unmapped.append(event)
+        elif gameweek is not None and fixture.event != gameweek:
+            continue
+        elif (
+            fixture.finished
+            or fixture.kickoff_time is None
+            or _parse_time(fixture.kickoff_time) <= now
+        ):
+            skipped.append(event)
+        else:
+            selected.append((event, fixture))
+    return selected, unmapped, skipped
 
 
 def _map_player_prop(

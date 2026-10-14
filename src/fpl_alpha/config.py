@@ -67,7 +67,7 @@ FPL_API = ProviderLimits(
     name="fpl",
     base_url="https://fantasy.premierleague.com/api",
     min_interval_s=1.0,        # be polite; endpoint can soft-ban a hammering IP
-    cache_ttl_s=60 * 60 * 6,   # bootstrap changes ~daily; 6h is plenty in dev
+    cache_ttl_s=60 * 60 * 24,  # bootstrap changes ~daily
     note="public, no key; keep <=1 req/s",
 )
 
@@ -85,6 +85,6 @@ PROPLINE = ProviderLimits(
     name="propline",
     base_url="https://api.prop-line.com/v1",
     min_interval_s=2.0,
-    cache_ttl_s=60 * 10,
+    cache_ttl_s=60 * 60 * 24,
     note="request only selected EPL events and markets; cache-first",
 )

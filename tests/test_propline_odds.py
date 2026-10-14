@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from fpl_alpha.identity import match_odds_name_strict, teams_from_bootstrap
 from fpl_alpha.ingestion import odds
 from fpl_alpha.schemas import Fixture, Player, Team
 from fpl_alpha.storage import (
@@ -249,6 +250,42 @@ def test_explicit_calvin_ramsay_alias_does_not_apply_outside_liverpool():
 
 
 @pytest.mark.parametrize(
+    ("selection", "player", "team"),
+    [
+        ("Ben White", Player(10, "White", "Benjamin White", 1, "DEF", 60), Team(1, "Arsenal", "ARS")),
+        ("Ephron Mason-Clarke", Player(186, "Mason-Clark", "Ephron Mason-Clark", 7, "MID", 50), Team(7, "Coventry City", "COV")),
+        ("Ferdi Kadioglu", Player(113, "F.Kadıoğlu", "Ferdi Kadıoğlu", 5, "DEF", 50), Team(5, "Brighton", "BHA")),
+        ("Jair", Player(474, "Jair Cunha", "Jair Paula da Cunha Filho", 18, "DEF", 45), Team(18, "Nott'm Forest", "NFO")),
+        ("Kaine Kessler", Player(177, "Kesler-Hayden", "Kaine Kesler-Hayden", 7, "DEF", 45), Team(7, "Coventry City", "COV")),
+        ("Savinho", Player(403, "Sávio", "Sávio Moreira de Oliveira", 19, "MID", 65), Team(19, "Spurs", "TOT")),
+        ("Yegor Yarmolyuk", Player(102, "Yarmoliuk", "Yehor Yarmoliuk", 4, "MID", 50), Team(4, "Brentford", "BRE")),
+        ("Yehor Yarmolyuk", Player(102, "Yarmoliuk", "Yehor Yarmoliuk", 4, "MID", 50), Team(4, "Brentford", "BRE")),
+    ],
+)
+def test_current_player_aliases_are_team_scoped(
+    selection: str, player: Player, team: Team
+):
+    opponent = Team(99, "Opponent", "OPP")
+    fixture = replace(_fixture(), team_h_fpl_id=team.fpl_id, team_a_fpl_id=opponent.fpl_id)
+    payload = _payload()
+    payload["home_team"] = team.name
+    payload["away_team"] = opponent.name
+    payload["bookmakers"][0]["markets"][-1]["outcomes"][0]["description"] = selection
+
+    _, _, player_mappings, _, snapshots = odds.normalize_propline_event_odds(
+        payload,
+        [team, opponent],
+        [player],
+        [fixture],
+        datetime(2026, 8, 20, 12, tzinfo=timezone.utc),
+    )
+
+    assert player_mappings[-1].fpl_player_id == player.fpl_id
+    assert player_mappings[-1].match_method == "explicit_alias"
+    assert snapshots[-1].fpl_player_id == player.fpl_id
+
+
+@pytest.mark.parametrize(
     "selection",
     ["Eric da Silva Moreira (NFO)", "Ryan McAidoo", "Ryan Mcaidoo (MCI)"],
 )
@@ -264,3 +301,54 @@ def test_absent_explicit_labels_remain_unmatched(selection: str):
     assert player_mappings[-1].fpl_player_id is None
     assert player_mappings[-1].match_method == "unmatched"
     assert snapshots[-1].fpl_player_id is None
+
+
+def test_selects_only_strictly_mapped_upcoming_events():
+    future = _fixture()
+    past = replace(
+        _fixture(),
+        fpl_id=100,
+        kickoff_time="2026-08-20T10:00:00Z",
+        started=True,
+    )
+    future_payload = _payload()
+    future_payload["id"] = "future"
+    past_payload = _payload()
+    past_payload["id"] = "past"
+    past_payload["commence_time"] = past.kickoff_time
+    unmapped_payload = _payload()
+    unmapped_payload["id"] = "unmapped"
+    unmapped_payload["home_team"] = "West Ham"
+
+    selected, unmapped, skipped = odds.mapped_upcoming_propline_events(
+        [future_payload, past_payload, unmapped_payload],
+        [Team(1, "Arsenal", "ARS"), Team(2, "Chelsea", "CHE")],
+        [future, past],
+        datetime(2026, 8, 20, 12, tzinfo=timezone.utc),
+    )
+
+    assert [(event.provider_event_id, fixture.fpl_id) for event, fixture in selected] == [
+        ("future", 99)
+    ]
+    assert [event.provider_event_id for event in unmapped] == ["unmapped"]
+    assert [event.provider_event_id for event in skipped] == ["past"]
+
+
+@pytest.mark.parametrize(
+    ("fpl_name", "provider_name"),
+    [
+        ("Brighton", "Brighton & Hove Albion"),
+        ("Coventry City", "Coventry"),
+        ("Hull City", "Hull"),
+        ("Ipswich Town", "Ipswich"),
+        ("Nott'm Forest", "Nottm Forest"),
+    ],
+)
+def test_current_propline_team_names_map_to_fpl_team_aliases(
+    fpl_name: str, provider_name: str
+):
+    team = teams_from_bootstrap(
+        {"teams": [{"id": 1, "name": fpl_name, "short_name": "TST"}]}
+    )[0]
+
+    assert match_odds_name_strict(provider_name, [team]) == (team, "normalized_exact")

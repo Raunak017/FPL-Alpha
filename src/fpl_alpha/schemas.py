@@ -367,5 +367,67 @@ class OddsOutcomeSnapshot:
     last_update: str | None
     last_change_at: str | None
     captured_at: datetime
+    run_id: str | None = None
 
 
+@dataclass(frozen=True)
+class OddsIngestionRun:
+    """Audit and status record for an atomic odds ingestion run."""
+
+    run_id: str
+    provider_key: str
+    provider_event_ids: tuple[str, ...]
+    input_fingerprint: str | None
+    status: str
+    failure_stage: str | None
+    error_message: str | None
+    records_fetched: int
+    records_parsed: int
+    records_inserted: int
+    records_updated: int
+    records_rejected: int
+    started_at: datetime
+    finished_at: datetime | None
+    duration_ms: float | None
+    retry_of_run_id: str | None = None
+    is_retry: bool = False
+
+
+# --- Stage 3: no-vig market probabilities -----------------------------------
+@dataclass(frozen=True)
+class MarketProb:
+    """A single fair (de-vigged, consensus) probability for one outcome."""
+
+    fixture_id: str
+    market: str        # e.g. "h2h", "totals_over_2.5", "btts", "anytime_goal"
+    outcome: str       # e.g. "home", "over", "yes", "<player>"
+    prob: float        # 0..1, margin-removed
+    n_books: int = 1
+
+
+# --- Market-vs-model comparison ---------------------------------------------
+@dataclass(frozen=True)
+class MarketModelComparison:
+    """One market consensus probability alongside the fitted model value."""
+
+    market: str
+    outcome: str
+    market_prob: float
+    model_prob: float
+    n_books: int
+
+
+@dataclass(frozen=True)
+class TeamGoalProjection:
+    """A persisted live team-goal fit and the consensus snapshot it used."""
+
+    fixture_fpl_id: int
+    generated_at: datetime
+    provider_key: str
+    provider_event_ids: tuple[str, ...]
+    source_captured_at_min: datetime
+    source_captured_at_max: datetime
+    source_market_snapshot_count: int
+    model: TeamGoalModel
+    fit_loss: float
+    comparisons: tuple[MarketModelComparison, ...]
