@@ -12,6 +12,10 @@ updates.
 - **Python Compatibility**: Restored `requires-python = ">=3.11"` in `pyproject.toml`.
 - **Minutes Shrinkage Bug**: Fixed a major bug in `src/fpl_alpha/minutes.py` where early-season start probabilities and expected minutes were severely artificially deflated because the empirical-Bayes shrinkage was hardcoded to divide by 38 `GAMES_PER_SEASON`. Made `games_played` dynamic based on the target gameweek.
 - **Reporting Bug**: Fixed an `UnboundLocalError` in `scripts/compare_ep_next.py` when running offline.
+### Changed
+- **Consolidated Team xG Calculation & Storage**: Unified live fitting and persistence pipelines across `team_xg.py` and `storage.py`. Models and market comparisons are stored in `team_goal_model_snapshots` (with `residuals` and `market_provenance`), while `fixture_team_xg` is maintained as a backward-compatible view with automatic migration for legacy base tables.
+- **Unified Fixture Resolution**: Added targeted `storage.load_fixture()` to avoid full fixture scans, parameterized `mapped_fixture_ids_with_odds()` and `upcoming_fixture_ids_with_odds()`, and aligned fixture resolution across CLI scripts (`build_team_xg.py`, `fit_team_xg.py`).
+- **Consolidated Downstream Model Resolution**: Added `resolve_fixture_team_goals()` in `team_xg.py`, eliminating duplicate market lookup and FPL fallback code in `scripts/optimize_team.py` and `scripts/explore_xpts.py`. Deduplicated `MarketProb` in `schemas.py`.
 
 ### Added
 - **Step 4 Persistence & Residuals**: Finished Step 4 architecture (`DuckDB consensus → fit_team_goals() → persisted team-xG with market provenance + fit residuals`). Added `fixture_team_xg` table in DuckDB, `FixtureTeamXG` schema, and `fit_and_persist_fixture_team_xg()` in `src/fpl_alpha/team_xg.py` / `storage.py`.

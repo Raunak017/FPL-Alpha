@@ -5,24 +5,32 @@ from __future__ import annotations
 import argparse
 
 from fpl_alpha.storage import open_database
-from fpl_alpha.team_xg import build_and_persist_team_goal_projection
+from fpl_alpha.team_xg import build_and_persist_team_goal_projection, upcoming_fixture_ids_with_odds
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--fixture-id", action="append", type=int, required=True)
+    parser.add_argument("--fixture-id", action="append", type=int, help="FPL fixture ID (repeatable)")
     parser.add_argument("--provider-key", default="propline")
     args = parser.parse_args()
 
     connection = open_database()
     try:
+        fixture_ids = args.fixture_id
+        if not fixture_ids:
+            fixture_ids = upcoming_fixture_ids_with_odds(connection, args.provider_key)
+
+        if not fixture_ids:
+            print(f"No upcoming fixtures found with mapped odds for provider '{args.provider_key}'.")
+            return
+
         connection.execute("BEGIN TRANSACTION")
         try:
             projections = [
                 build_and_persist_team_goal_projection(
                     connection, fixture_id, args.provider_key
                 )
-                for fixture_id in args.fixture_id
+                for fixture_id in fixture_ids
             ]
         except Exception:
             connection.execute("ROLLBACK")

@@ -393,18 +393,6 @@ class OddsIngestionRun:
     is_retry: bool = False
 
 
-# --- Stage 3: no-vig market probabilities -----------------------------------
-@dataclass(frozen=True)
-class MarketProb:
-    """A single fair (de-vigged, consensus) probability for one outcome."""
-
-    fixture_id: str
-    market: str        # e.g. "h2h", "totals_over_2.5", "btts", "anytime_goal"
-    outcome: str       # e.g. "home", "over", "yes", "<player>"
-    prob: float        # 0..1, margin-removed
-    n_books: int = 1
-
-
 # --- Market-vs-model comparison ---------------------------------------------
 @dataclass(frozen=True)
 class MarketModelComparison:
@@ -431,3 +419,17 @@ class TeamGoalProjection:
     model: TeamGoalModel
     fit_loss: float
     comparisons: tuple[MarketModelComparison, ...]
+
+    def to_fixture_team_xg(self) -> FixtureTeamXG:
+        return FixtureTeamXG(
+            fixture_fpl_id=self.fixture_fpl_id,
+            provider_key=self.provider_key,
+            captured_at=self.source_captured_at_max,
+            lambda_home=self.model.lambda_home,
+            lambda_away=self.model.lambda_away,
+            p_clean_sheet_home=self.model.p_clean_sheet_home,
+            p_clean_sheet_away=self.model.p_clean_sheet_away,
+            fit_loss=self.fit_loss,
+            residuals=self.model.residuals,
+            market_provenance=self.model.market_provenance,
+        )

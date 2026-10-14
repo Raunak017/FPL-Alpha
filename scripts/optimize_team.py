@@ -43,8 +43,8 @@ def main():
     now_utc = datetime.now(timezone.utc)
     snapshots = {s.player_fpl_id: s for s in player_snapshots_from_bootstrap(boot, now_utc)}
     
-    from fpl_alpha.schemas import TeamGoalModel
-    from fpl_alpha.storage import open_database, load_latest_fixture_team_xg
+    from fpl_alpha.storage import open_database
+    from fpl_alpha.team_xg import resolve_fixture_team_goals
     conn = open_database()
 
     print("Running Projections (Market-implied when available, FPL fallback otherwise)...")
@@ -61,28 +61,14 @@ def main():
         h_str = home_fpl.get("strength_overall_home", 3)
         a_str = away_fpl.get("strength_overall_away", 3)
         
-        m_rec = load_latest_fixture_team_xg(conn, fixture.fpl_id)
-        if m_rec is not None:
-            model = TeamGoalModel(
-                fixture_id=f"{home_team.short_name}_v_{away_team.short_name}",
-                home_team_fpl_id=home_team.fpl_id,
-                away_team_fpl_id=away_team.fpl_id,
-                lambda_home=m_rec.lambda_home,
-                lambda_away=m_rec.lambda_away,
-                p_clean_sheet_home=m_rec.p_clean_sheet_home,
-                p_clean_sheet_away=m_rec.p_clean_sheet_away,
-                fit_loss=m_rec.fit_loss,
-                residuals=m_rec.residuals,
-                market_provenance=m_rec.market_provenance,
-            )
-            cs = {home_team.fpl_id: m_rec.p_clean_sheet_home, away_team.fpl_id: m_rec.p_clean_sheet_away}
-        else:
-            model = fit_fpl_team_goals(
-                f"{home_team.short_name}_v_{away_team.short_name}", 
-                home_team.fpl_id, away_team.fpl_id, 
-                h_str, a_str
-            )
-            cs = {home_team.fpl_id: model.p_clean_sheet_home, away_team.fpl_id: model.p_clean_sheet_away}
+        model, cs = resolve_fixture_team_goals(
+            conn,
+            fixture,
+            home_strength=h_str,
+            away_strength=a_str,
+            home_team_name=home_team.short_name,
+            away_team_name=away_team.short_name,
+        )
         
         for r in allocate_fixture(model, rates):
             e = el[r.fpl_id]

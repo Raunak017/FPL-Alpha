@@ -10,30 +10,23 @@ from __future__ import annotations
 import argparse
 
 from fpl_alpha.storage import open_database
-from fpl_alpha.team_xg import fit_and_persist_fixture_team_xg
+from fpl_alpha.team_xg import fit_and_persist_fixture_team_xg, mapped_fixture_ids_with_odds
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture-id", action="append", type=int, help="FPL fixture ID (repeatable)")
     parser.add_argument("--provider", default="propline", help="Odds provider (default: propline)")
+    parser.add_argument("--all", action="store_true", help="Include finished/historical fixtures with mapped odds")
     args = parser.parse_args()
 
     connection = open_database()
     try:
         fixture_ids = args.fixture_id
         if not fixture_ids:
-            # If no fixtures specified, find fixtures with complete odds in mappings
-            rows = connection.execute(
-                """
-                SELECT DISTINCT m.fpl_fixture_id
-                FROM odds_event_fixture_mappings AS m
-                WHERE m.provider_key = ? AND m.fpl_fixture_id IS NOT NULL
-                ORDER BY m.fpl_fixture_id
-                """,
-                [args.provider],
-            ).fetchall()
-            fixture_ids = [r[0] for r in rows]
+            fixture_ids = mapped_fixture_ids_with_odds(
+                connection, provider_key=args.provider, upcoming_only=not args.all
+            )
 
         if not fixture_ids:
             print(f"No fixtures found with mapped odds for provider '{args.provider}'.")
