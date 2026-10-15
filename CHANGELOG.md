@@ -18,6 +18,7 @@ updates.
 - **Consolidated Downstream Model Resolution**: Added `resolve_fixture_team_goals()` in `team_xg.py`, eliminating duplicate market lookup and FPL fallback code in `scripts/optimize_team.py` and `scripts/explore_xpts.py`. Deduplicated `MarketProb` in `schemas.py`.
 
 ### Added
+- **GitHub Actions CI Workflow**: Added `.github/workflows/ci.yml` running the test suite with `uv` on Python 3.11 for pushes to `main`, PRs to `main`, and manual dispatch (`workflow_dispatch`), with concurrency cancellation for obsolete runs.
 - **Step 4 Persistence & Residuals**: Finished Step 4 architecture (`DuckDB consensus → fit_team_goals() → persisted team-xG with market provenance + fit residuals`). Added `fixture_team_xg` table in DuckDB, `FixtureTeamXG` schema, and `fit_and_persist_fixture_team_xg()` in `src/fpl_alpha/team_xg.py` / `storage.py`.
 - **Step 4 CLI Tool**: Added `scripts/fit_team_xg.py` and `--fit` flag to `scripts/build_market_consensus.py` to fit and persist team goals directly from DuckDB odds consensus.
 - **Architecture Integrity**: Preserved primary PropLine → DuckDB → `consensus_from_latest_odds()` pipeline in docs and scripts, keeping The Odds API as a secondary/fallback source.
