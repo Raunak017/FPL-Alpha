@@ -19,8 +19,10 @@ import re
 from collections.abc import Iterable
 from typing import Any
 
-from .markets import consensus_from_latest_odds
+from .markets import consensus_from_latest_odds, latest_odds_snapshot_provenance
 from .schemas import (
+    Fixture,
+    FixtureTeamXG,
     MarketModelComparison,
     MarketProb,
     TeamGoalModel,
@@ -28,8 +30,8 @@ from .schemas import (
 )
 from .storage import (
     insert_team_goal_projection,
-    latest_odds_snapshot_provenance,
-    load_fixtures,
+    load_fixture,
+    load_latest_fixture_team_xg,
 )
 
 # Goal ceiling for integrating the Poisson grid. P(goals > 10) is negligible
@@ -173,6 +175,16 @@ def fit_team_goals(
         if abs(lh - prev_lh) + abs(la - prev_la) < 1e-6:
             break
 
+    model = model_probs(lh, la, total_line)
+    residuals = {k: model[k] - targets[k] for k in targets if k in model}
+    fit_loss = sum(r**2 for r in residuals.values())
+    market_provenance = {
+        "markets": sorted(set(mp.market for mp in market_probs)),
+        "n_books": max((mp.n_books for mp in market_probs), default=0),
+        "total_line": total_line,
+        "targets": targets,
+    }
+
     return TeamGoalModel(
         fixture_id=fixture_id,
         home_team_fpl_id=home_team_fpl_id,
@@ -183,10 +195,113 @@ def fit_team_goals(
         p_clean_sheet_home=poisson_pmf(0, la),
         p_clean_sheet_away=poisson_pmf(0, lh),
         score_dist=score_matrix(lh, la),
+        fit_loss=fit_loss,
+        residuals=residuals,
+        market_provenance=market_provenance,
     )
+
+
+def fit_fixture_from_duckdb(
+    connection: Any,
+    fixture_fpl_id: int,
+    provider_key: str = "propline",
+    captured_at: datetime | None = None,
+) -> FixtureTeamXG:
+    """Step 4: DuckDB consensus -> fit_team_goals() -> FixtureTeamXG."""
+    market_probs = consensus_from_latest_odds(
+        connection, fixture_fpl_id, provider_key=provider_key
+    )
+    if not market_probs:
+        raise ValueError(
+            f"No usable complete market odds found in DuckDB for fixture {fixture_fpl_id} (provider={provider_key})"
+        )
+
+    fixture = load_fixture(connection, fixture_fpl_id)
+    if fixture is None:
+        raise ValueError(f"Fixture {fixture_fpl_id} not found in fixtures table")
+
+    event_ids, captured_min, captured_max, _ = latest_odds_snapshot_provenance(
+        connection, fixture_fpl_id, provider_key
+    )
+    c_at = captured_at or captured_max or datetime.now(timezone.utc)
+    model = fit_team_goals(
+        str(fixture_fpl_id), fixture.team_h_fpl_id, fixture.team_a_fpl_id, market_probs
+    )
+    return FixtureTeamXG(
+        fixture_fpl_id=fixture_fpl_id,
+        provider_key=provider_key,
+        captured_at=c_at,
+        lambda_home=model.lambda_home,
+        lambda_away=model.lambda_away,
+        p_clean_sheet_home=model.p_clean_sheet_home,
+        p_clean_sheet_away=model.p_clean_sheet_away,
+        fit_loss=model.fit_loss,
+        residuals=model.residuals,
+        market_provenance=model.market_provenance,
+    )
+
+
+def fit_and_persist_fixture_team_xg(
+    connection: Any,
+    fixture_fpl_id: int,
+    provider_key: str = "propline",
+    captured_at: datetime | None = None,
+) -> FixtureTeamXG:
+    """Step 4: DuckDB consensus -> fit_team_goals() -> persisted team-xG in DuckDB."""
+    projection = build_and_persist_team_goal_projection(
+        connection,
+        fixture_fpl_id,
+        provider_key=provider_key,
+        generated_at=captured_at,
+    )
+    return projection.to_fixture_team_xg()
+
+
+def fit_fpl_team_goals(
+    fixture_id: str,
+    home_team_fpl_id: int,
+    away_team_fpl_id: int,
+    home_strength: int,
+    away_strength: int,
+) -> TeamGoalModel:
+    """Fallback: Estimate expected goals directly from FPL's 1-5 strength ratings.
+    
+    Used when the Odds API is unavailable or bypassed via --mock-odds.
+    Maps FPL's crude 1-5 strength metric (FDR) into attacking and defensive
+    multipliers to compute independent Poisson lambdas.
+    """
+    # Map FPL 1-5 scale to attacking/defending multipliers
+    # 2=weak, 3=average, 4=strong, 5=elite
+    atk_mult = {1: 0.60, 2: 0.75, 3: 1.00, 4: 1.25, 5: 1.50}
+    def_mult = {1: 1.40, 2: 1.25, 3: 1.00, 4: 0.80, 5: 0.65}
+    
+    # Base Premier League goal expectations
+    base_home = 1.55
+    base_away = 1.25
+    
+    # Clip strengths just in case FPL returns something weird
+    h_str = max(1, min(5, home_strength))
+    a_str = max(1, min(5, away_strength))
+    
+    lh = base_home * atk_mult[h_str] * def_mult[a_str]
+    la = base_away * atk_mult[a_str] * def_mult[h_str]
+    
+    return TeamGoalModel(
+        fixture_id=fixture_id,
+        home_team_fpl_id=home_team_fpl_id,
+        away_team_fpl_id=away_team_fpl_id,
+        lambda_home=lh,
+        lambda_away=la,
+        p_clean_sheet_home=poisson_pmf(0, la),
+        p_clean_sheet_away=poisson_pmf(0, lh),
+        score_dist=score_matrix(lh, la),
+    )
+
 
 def team_goal_fit_loss(model: TeamGoalModel, market_probs: Iterable[MarketProb]) -> float:
     """Return the fitted sum-of-squared market-probability error."""
+    if model.fit_loss:
+        return model.fit_loss
     targets, total_line = _build_targets(market_probs)
     return _loss(model.lambda_home, model.lambda_away, targets, total_line)
 
@@ -221,15 +336,14 @@ def model_market_comparisons(
     return tuple(comparisons)
 
 
-def upcoming_fixture_ids_with_odds(
+def mapped_fixture_ids_with_odds(
     connection: Any,
     provider_key: str = "propline",
+    upcoming_only: bool = False,
     now: datetime | None = None,
 ) -> list[int]:
-    """Return future FPL fixtures with at least one mapped provider outcome."""
-    current_time = now or datetime.now(timezone.utc)
-    rows = connection.execute(
-        """
+    """Return fixture IDs with mapped provider outcome snapshots."""
+    query = """
         SELECT DISTINCT mapping.fpl_fixture_id
         FROM odds_event_fixture_mappings AS mapping
         JOIN odds_outcome_snapshots AS snapshot
@@ -238,14 +352,31 @@ def upcoming_fixture_ids_with_odds(
         JOIN fixtures AS fixture
           ON fixture.fpl_id = mapping.fpl_fixture_id
         WHERE mapping.provider_key = ?
-          AND fixture.finished = FALSE
-          AND fixture.kickoff_time IS NOT NULL
-          AND fixture.kickoff_time > ?
-        ORDER BY mapping.fpl_fixture_id
-        """,
-        [provider_key, current_time],
-    ).fetchall()
+          AND mapping.fpl_fixture_id IS NOT NULL
+    """
+    params: list[Any] = [provider_key]
+    if upcoming_only:
+        current_time = now or datetime.now(timezone.utc)
+        query += """
+            AND fixture.finished = FALSE
+            AND fixture.kickoff_time IS NOT NULL
+            AND fixture.kickoff_time > ?
+        """
+        params.append(current_time)
+    query += " ORDER BY mapping.fpl_fixture_id"
+    rows = connection.execute(query, params).fetchall()
     return [fixture_fpl_id for (fixture_fpl_id,) in rows]
+
+
+def upcoming_fixture_ids_with_odds(
+    connection: Any,
+    provider_key: str = "propline",
+    now: datetime | None = None,
+) -> list[int]:
+    """Return future FPL fixtures with at least one mapped provider outcome."""
+    return mapped_fixture_ids_with_odds(
+        connection, provider_key=provider_key, upcoming_only=True, now=now
+    )
 
 
 def build_and_persist_team_goal_projection(
@@ -259,10 +390,7 @@ def build_and_persist_team_goal_projection(
     if not market_probs:
         raise ValueError(f"no complete match-market consensus for fixture {fixture_fpl_id}")
 
-    fixture = next(
-        (item for item in load_fixtures(connection) if item.fpl_id == fixture_fpl_id),
-        None,
-    )
+    fixture = load_fixture(connection, fixture_fpl_id)
     if fixture is None:
         raise ValueError(f"unknown FPL fixture {fixture_fpl_id}")
 
@@ -275,17 +403,60 @@ def build_and_persist_team_goal_projection(
     event_ids, captured_min, captured_max, snapshot_count = latest_odds_snapshot_provenance(
         connection, fixture_fpl_id, provider_key
     )
+    gen_at = generated_at or datetime.now(timezone.utc)
     projection = TeamGoalProjection(
         fixture_fpl_id=fixture_fpl_id,
-        generated_at=generated_at or datetime.now(timezone.utc),
+        generated_at=gen_at,
         provider_key=provider_key,
         provider_event_ids=event_ids,
-        source_captured_at_min=captured_min,
-        source_captured_at_max=captured_max,
+        source_captured_at_min=captured_min or gen_at,
+        source_captured_at_max=captured_max or gen_at,
         source_market_snapshot_count=snapshot_count,
         model=model,
-        fit_loss=team_goal_fit_loss(model, market_probs),
+        fit_loss=model.fit_loss,
         comparisons=model_market_comparisons(model, market_probs),
     )
     insert_team_goal_projection(connection, projection)
     return projection
+
+
+def resolve_fixture_team_goals(
+    connection: Any,
+    fixture: Fixture,
+    home_strength: int = 3,
+    away_strength: int = 3,
+    provider_key: str = "propline",
+    home_team_name: str | None = None,
+    away_team_name: str | None = None,
+) -> tuple[TeamGoalModel, dict[int, float]]:
+    """Resolve team goals for a fixture: market-implied from DB if available, FPL fallback otherwise.
+
+    Returns (TeamGoalModel, clean_sheet_prob_dict).
+    """
+    fid_label = f"{home_team_name or fixture.team_h_fpl_id}_v_{away_team_name or fixture.team_a_fpl_id}"
+    m_rec = load_latest_fixture_team_xg(connection, fixture.fpl_id, provider_key=provider_key)
+    if m_rec is not None:
+        model = TeamGoalModel(
+            fixture_id=fid_label,
+            home_team_fpl_id=fixture.team_h_fpl_id,
+            away_team_fpl_id=fixture.team_a_fpl_id,
+            lambda_home=m_rec.lambda_home,
+            lambda_away=m_rec.lambda_away,
+            p_clean_sheet_home=m_rec.p_clean_sheet_home,
+            p_clean_sheet_away=m_rec.p_clean_sheet_away,
+            score_dist=score_matrix(m_rec.lambda_home, m_rec.lambda_away),
+            fit_loss=m_rec.fit_loss,
+            residuals=m_rec.residuals,
+            market_provenance=m_rec.market_provenance,
+        )
+        cs = {fixture.team_h_fpl_id: m_rec.p_clean_sheet_home, fixture.team_a_fpl_id: m_rec.p_clean_sheet_away}
+    else:
+        model = fit_fpl_team_goals(
+            fid_label,
+            fixture.team_h_fpl_id,
+            fixture.team_a_fpl_id,
+            home_strength,
+            away_strength,
+        )
+        cs = {fixture.team_h_fpl_id: model.p_clean_sheet_home, fixture.team_a_fpl_id: model.p_clean_sheet_away}
+    return model, cs

@@ -19,10 +19,37 @@ per-provider budgets defined in `fpl_alpha.config` (`ProviderLimits`). Never
 call `urllib`/`requests` directly from a stage; never add a call that bypasses
 `cache.py`.
 
-### PropLine EPL odds
-- PropLine is the sole odds provider. The key is `.env` → `PROPLINE_API_KEY`.
-- Fetch only mapped upcoming fixtures and the selected markets; rely on the 24-hour
-  raw-cache TTL for repeat runs unless `--force` is explicitly needed.
+### Odds Architecture: PropLine (Primary) → DuckDB → Consensus
+The primary operational odds pipeline is:
+1. Ingest PropLine odds cache-first via `scripts/refresh_upcoming_propline_odds.py` or `scripts/refresh_propline_odds.py`.
+2. Persist normalized records to DuckDB (`odds_outcome_snapshots`, `odds_event_fixture_mappings`, etc.).
+3. Form robust consensus probabilities via `markets.consensus_from_latest_odds()`.
+4. Fit Poisson team goals via `team_xg.fit_and_persist_fixture_team_xg()` / `build_and_persist_team_goal_projection()` into DuckDB.
+
+### The Odds API — Secondary / Fallback Source
+The Odds API (`the_odds_api_epl`, `scripts/snapshot_odds.py`) is maintained as a secondary/fallback source. Handle its budget with care:
+- Free tier ≈ **500 credits/month**. **Credits are consumed per request as
+  `#markets × #regions`** — e.g. `markets=h2h,totals` + `regions=uk,eu` = **4 credits/call**
+  (historical requests cost **×10**). Request only what you use.
+- **The API reports your budget back to you.** Every live response carries
+  `x-requests-remaining`, `x-requests-used`, and `x-requests-last` (cost of that
+  call). `cache.py` records these to `data/raw/the-odds-api/_usage.json` and logs
+  a warning once remaining dips below `THE_ODDS_API.low_budget_threshold` (50).
+  Read the running total with `cache.read_usage("the-odds-api")`.
+- **Rules for this repo:**
+  - Throttle is `THE_ODDS_API.min_interval_s = 2.0` and cache TTL is 10 min in `config.py`.
+  - Capture snapshots on a schedule, never in a loop. Always develop against cached files.
+- Key: `.env` → `ODDS_API_KEY`.
+
+### Consolidating many bookmakers into one number
+The Odds API returns **raw per-bookmaker prices with no consensus of its own**
+(a single EPL fixture can list ~20 books). Our consolidation is
+`markets.consensus`: de-vig each book independently, then combine per outcome
+with an **outlier-resistant center** (drop the highest and lowest quote, average
+the rest — a symmetric trimmed mean that degrades to the median for 3 books and
+the plain mean for ≤2), renormalized to a valid distribution. This keeps one
+stray/slow book from skewing the fair probability, which matters most for thin
+markets like player props quoted by only 2–3 US books.
 
 ### Official FPL API (no key, but still be polite)
 - Not formally documented; no published rate limit, but the endpoint **can soft-ban an IP**
@@ -33,6 +60,7 @@ call `urllib`/`requests` directly from a stage; never add a call that bypasses
 ## Developers (2)
 
 - **dev1 — Rushi Pardeshi.** FPL Team ID `432989` (team name "KanteGetAnyWorse", USA).
+  Owns the current The Odds API key.
 - **dev2 — TBD.** Add their FPL Team ID to `.env` as `FPL_TEAM_ID_DEV2` when known.
 
 ## Data layers & access
@@ -44,7 +72,8 @@ call `urllib`/`requests` directly from a stage; never add a call that bypasses
 | Manager squad/history | `/api/entry/{id}/`, `/history/`, `/event/{gw}/picks/` | none (public by Team ID) | ✅ (picks public only after a GW locks) |
 | Football xG stats | FPL bootstrap (primary); FBref (secondary) | none | ✅ FPL / ⚠️ FBref scrape with care |
 | Understat xG | understat.com | none | ⛔ anti-bot gated now |
-| Betting odds | PropLine | `PROPLINE_API_KEY` | ✅ cache-first EPL ingestion |
+| Betting odds (Primary: match & props) | PropLine (via `refresh_upcoming_propline_odds.py` → DuckDB) | `PROPLINE_API_KEY` | ✅ cache-first EPL ingestion |
+| Betting odds (Secondary / fallback) | The Odds API (`soccer_epl`, featured `/odds`) | **API key** (`ODDS_API_KEY`) | ✅ secondary/fallback feed |
 
 ## Layout
 
@@ -67,7 +96,7 @@ FPL-Alpha/
 │   ├── team_xg.py            # market-implied Poisson team goals       (step 4)
 │   └── models/               # player-level models                    (steps 5+, empty)
 │
-├── scripts/                  # refresh_fpl.py · refresh_propline_odds.py
+├── scripts/                  # refresh_fpl.py · refresh_upcoming_propline_odds.py
 ├── tests/                    # pytest (no-vig math covered)
 ├── notebooks/
 ├── docs/                     # PROJECT_PLAN.md (the 12-step roadmap)
@@ -87,11 +116,17 @@ cp .env.example .env          # add keys / team ids as available
 
 python scripts/refresh_fpl.py         # cache FPL bootstrap + fixtures (cache-first)
 python scripts/refresh_upcoming_propline_odds.py  # mapped upcoming EPL odds
+# Or fallback scheduled snapshot:
+python scripts/snapshot_odds.py --scope epl-gw1 --captured-at 2026-08-21T17:30:00Z
 pytest                                 # runs the no-vig math tests
 ```
 
 `refresh_fpl.py` does nothing over the wire if the cache is still fresh; pass
 `--force` to bypass the TTL. PropLine refreshes are cache-first; never poll in a loop.
+
+**Whenever a new script is added to `scripts/`, update the Scripts table in
+[`README.md`](README.md)** (and its Quickstart if the script belongs there)
+in the same change — don't let the docs drift from what's actually runnable.
 
 ## Conventions
 

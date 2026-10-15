@@ -19,6 +19,7 @@ import duckdb
 from .config import DATA
 from .schemas import (
     Fixture,
+    FixtureTeamXG,
     OddsBookmaker,
     OddsEventFixtureMapping,
     OddsIngestionRun,
@@ -26,8 +27,10 @@ from .schemas import (
     OddsPlayerMapping,
     OddsProviderEvent,
     Player,
+    PlayerFixtureProjection,
     PlayerGameweekHistory,
     PlayerSnapshot,
+    ProjectionRun,
     Team,
     TeamGoalProjection,
 )
@@ -172,6 +175,52 @@ def initialize_schema(connection: duckdb.DuckDBPyConnection) -> None:
             gameweek INTEGER PRIMARY KEY
         );
 
+        -- Projection runs are immutable.  Never overwrite a prior forecast:
+        -- historical forecasts are required for honest calibration/backtests.
+        CREATE TABLE IF NOT EXISTS projection_runs (
+            run_id UUID PRIMARY KEY,
+            gameweek INTEGER NOT NULL,
+            model_name VARCHAR NOT NULL,
+            model_version VARCHAR NOT NULL,
+            scoring_rules_version VARCHAR NOT NULL,
+            input_fingerprint VARCHAR NOT NULL UNIQUE,
+            as_of TIMESTAMPTZ NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL,
+            is_partial BOOLEAN NOT NULL,
+            notes VARCHAR
+        );
+
+        CREATE TABLE IF NOT EXISTS player_fixture_projections (
+            run_id UUID NOT NULL,
+            gameweek INTEGER NOT NULL,
+            player_fpl_id BIGINT NOT NULL,
+            fixture_fpl_id BIGINT NOT NULL,
+            expected_points DOUBLE NOT NULL,
+            expected_goals DOUBLE,
+            expected_assists DOUBLE,
+            p_start DOUBLE,
+            p_60_plus DOUBLE,
+            p_clean_sheet DOUBLE,
+            appearance_points DOUBLE,
+            goal_points DOUBLE,
+            assist_points DOUBLE,
+            clean_sheet_points DOUBLE,
+            save_points DOUBLE,
+            defensive_contribution_points DOUBLE,
+            bonus_points DOUBLE,
+            goals_conceded_points DOUBLE,
+            card_points DOUBLE,
+            PRIMARY KEY (run_id, player_fpl_id, fixture_fpl_id)
+        );
+
+        -- The selection is mutable; the forecast rows it points to are not.
+        CREATE TABLE IF NOT EXISTS gameweek_projection_selections (
+            gameweek INTEGER PRIMARY KEY,
+            run_id UUID NOT NULL,
+            selected_at TIMESTAMPTZ NOT NULL,
+            selection_reason VARCHAR NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS odds_provider_events (
             provider_key VARCHAR NOT NULL,
             provider_event_id VARCHAR NOT NULL,
@@ -263,6 +312,8 @@ def initialize_schema(connection: duckdb.DuckDBPyConnection) -> None:
             p_clean_sheet_home DOUBLE NOT NULL,
             p_clean_sheet_away DOUBLE NOT NULL,
             fit_loss DOUBLE NOT NULL,
+            residuals VARCHAR DEFAULT '{}',
+            market_provenance VARCHAR DEFAULT '{}',
             PRIMARY KEY (fixture_fpl_id, generated_at)
         );
 
@@ -277,7 +328,11 @@ def initialize_schema(connection: duckdb.DuckDBPyConnection) -> None:
             PRIMARY KEY (fixture_fpl_id, generated_at, market, outcome)
         );
 
+        ALTER TABLE team_goal_model_snapshots ADD COLUMN IF NOT EXISTS residuals VARCHAR DEFAULT '{}';
+        ALTER TABLE team_goal_model_snapshots ADD COLUMN IF NOT EXISTS market_provenance VARCHAR DEFAULT '{}';
+
         ALTER TABLE player_snapshots ADD COLUMN IF NOT EXISTS total_points INTEGER;
+        ALTER TABLE projection_runs ADD COLUMN IF NOT EXISTS scoring_rules_version VARCHAR;
         ALTER TABLE player_snapshots ADD COLUMN IF NOT EXISTS points_per_game DOUBLE;
         ALTER TABLE player_snapshots ADD COLUMN IF NOT EXISTS form DOUBLE;
         ALTER TABLE player_snapshots ADD COLUMN IF NOT EXISTS minutes INTEGER;
@@ -324,6 +379,63 @@ def initialize_schema(connection: duckdb.DuckDBPyConnection) -> None:
             CASE WHEN now_cost > 0 THEN total_points / (now_cost / 10.0) END AS points_per_million,
             CASE WHEN minutes > 0 THEN total_points * 90.0 / minutes END AS points_per_90
         FROM player_snapshots;
+
+        CREATE OR REPLACE VIEW selected_player_gameweek_projections AS
+        SELECT
+            selection.gameweek,
+            projection.player_fpl_id,
+            selection.run_id,
+            SUM(projection.expected_points) AS expected_points
+        FROM gameweek_projection_selections AS selection
+        JOIN player_fixture_projections AS projection
+            ON projection.run_id = selection.run_id
+        GROUP BY selection.gameweek, projection.player_fpl_id, selection.run_id;
+        """
+    )
+
+    # Ensure legacy fixture_team_xg table is migrated to team_goal_model_snapshots if present
+    table_type_row = connection.execute(
+        """
+        SELECT table_type
+        FROM information_schema.tables
+        WHERE table_name = 'fixture_team_xg'
+        """
+    ).fetchone()
+    if table_type_row and table_type_row[0] == "BASE TABLE":
+        connection.execute(
+            """
+            INSERT INTO team_goal_model_snapshots (
+                fixture_fpl_id, generated_at, provider_key, provider_event_ids,
+                source_captured_at_min, source_captured_at_max, source_market_snapshot_count,
+                lambda_home, lambda_away, p_clean_sheet_home, p_clean_sheet_away,
+                fit_loss, residuals, market_provenance
+            )
+            SELECT
+                fixture_fpl_id, captured_at, provider_key, [],
+                captured_at, captured_at, 1,
+                lambda_home, lambda_away, p_clean_sheet_home, p_clean_sheet_away,
+                fit_loss, residuals, market_provenance
+            FROM fixture_team_xg
+            ON CONFLICT (fixture_fpl_id, generated_at) DO NOTHING;
+            DROP TABLE fixture_team_xg;
+            """
+        )
+
+    connection.execute(
+        """
+        CREATE OR REPLACE VIEW fixture_team_xg AS
+        SELECT
+            fixture_fpl_id,
+            provider_key,
+            generated_at AS captured_at,
+            lambda_home,
+            lambda_away,
+            p_clean_sheet_home,
+            p_clean_sheet_away,
+            fit_loss,
+            residuals,
+            market_provenance
+        FROM team_goal_model_snapshots;
         """
     )
 
@@ -651,6 +763,125 @@ def mark_gameweek_history_ingested(
     )
 
 
+def persist_projection_run(
+    connection: duckdb.DuckDBPyConnection,
+    run: ProjectionRun,
+    projections: Iterable[PlayerFixtureProjection],
+) -> str:
+    """Persist an immutable run and return its id.
+
+    A matching ``input_fingerprint`` identifies an identical model-and-input
+    state, so retrying a run returns its existing id without writing duplicate
+    forecasts.  Callers must generate a different fingerprint whenever any
+    source snapshot, model configuration, or model code changes.
+    """
+    rows = list(projections)
+    if not rows:
+        raise ValueError("a projection run must contain at least one player fixture projection")
+    if any(row.run_id != run.run_id for row in rows):
+        raise ValueError("every projection row must belong to the supplied run")
+    if any(row.gameweek != run.gameweek for row in rows):
+        raise ValueError("every projection row must belong to the supplied gameweek")
+
+    existing = connection.execute(
+        "SELECT run_id FROM projection_runs WHERE input_fingerprint = ?",
+        [run.input_fingerprint],
+    ).fetchone()
+    if existing is not None:
+        return str(existing[0])
+
+    connection.execute(
+        """
+        INSERT INTO projection_runs (
+            run_id, gameweek, model_name, model_version, scoring_rules_version, input_fingerprint,
+            as_of, created_at, is_partial, notes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            run.run_id,
+            run.gameweek,
+            run.model_name,
+            run.model_version,
+            run.scoring_rules_version,
+            run.input_fingerprint,
+            run.as_of,
+            run.created_at,
+            run.is_partial,
+            run.notes,
+        ],
+    )
+    connection.executemany(
+        """
+        INSERT INTO player_fixture_projections (
+            run_id, gameweek, player_fpl_id, fixture_fpl_id, expected_points,
+            expected_goals, expected_assists, p_start, p_60_plus, p_clean_sheet,
+            appearance_points, goal_points, assist_points, clean_sheet_points,
+            save_points, defensive_contribution_points, bonus_points,
+            goals_conceded_points, card_points
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                row.run_id,
+                row.gameweek,
+                row.player_fpl_id,
+                row.fixture_fpl_id,
+                row.expected_points,
+                row.expected_goals,
+                row.expected_assists,
+                row.p_start,
+                row.p_60_plus,
+                row.p_clean_sheet,
+                row.appearance_points,
+                row.goal_points,
+                row.assist_points,
+                row.clean_sheet_points,
+                row.save_points,
+                row.defensive_contribution_points,
+                row.bonus_points,
+                row.goals_conceded_points,
+                row.card_points,
+            )
+            for row in rows
+        ],
+    )
+    return run.run_id
+
+
+def select_gameweek_projection_run(
+    connection: duckdb.DuckDBPyConnection,
+    gameweek: int,
+    run_id: str,
+    selected_at: datetime,
+    *,
+    selection_reason: str,
+) -> None:
+    """Set the run used as the official forecast for one gameweek.
+
+    This changes only a pointer, keeping every historical forecast intact.  The
+    caller supplies ``selected_at`` explicitly to retain a reproducible audit
+    trail; the normal policy is the final successful run before the deadline.
+    """
+    row = connection.execute(
+        "SELECT gameweek FROM projection_runs WHERE run_id = ?", [run_id]
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"projection run {run_id} does not exist")
+    if row[0] != gameweek:
+        raise ValueError(f"projection run {run_id} does not belong to gameweek {gameweek}")
+    connection.execute(
+        """
+        INSERT INTO gameweek_projection_selections (
+            gameweek, run_id, selected_at, selection_reason
+        ) VALUES (?, ?, ?, ?)
+        ON CONFLICT (gameweek) DO UPDATE SET
+            run_id = excluded.run_id,
+            selected_at = excluded.selected_at,
+            selection_reason = excluded.selection_reason
+        """,
+        [gameweek, run_id, selected_at, selection_reason],
+    )
+
 def load_teams(connection: duckdb.DuckDBPyConnection) -> list[Team]:
     """Load canonical teams for provider-event fixture matching."""
     return [
@@ -708,6 +939,40 @@ def load_fixtures(connection: duckdb.DuckDBPyConnection) -> list[Fixture]:
             team_h_difficulty,
         ) in rows
     ]
+
+
+def load_fixture(connection: duckdb.DuckDBPyConnection, fixture_fpl_id: int) -> Fixture | None:
+    """Load a single canonical FPL fixture by fpl_id."""
+    rows = connection.execute(
+        """
+        SELECT fpl_id, code, event, CAST(kickoff_time AS VARCHAR), finished, finished_provisional,
+               minutes, provisional_start_time, started, team_a_fpl_id, team_a_score,
+               team_a_difficulty, team_h_fpl_id, team_h_score, team_h_difficulty
+        FROM fixtures
+        WHERE fpl_id = ?
+        """,
+        [fixture_fpl_id],
+    ).fetchall()
+    if not rows:
+        return None
+    r = rows[0]
+    return Fixture(
+        fpl_id=r[0],
+        code=r[1],
+        event=r[2],
+        kickoff_time=_timestamp_as_iso(r[3]),
+        finished=r[4],
+        finished_provisional=r[5],
+        minutes=r[6],
+        provisional_start_time=r[7],
+        started=r[8],
+        team_a_fpl_id=r[9],
+        team_a_score=r[10],
+        team_a_difficulty=r[11],
+        team_h_fpl_id=r[12],
+        team_h_score=r[13],
+        team_h_difficulty=r[14],
+    )
 
 
 def load_players(connection: duckdb.DuckDBPyConnection) -> list[Player]:
@@ -1553,13 +1818,16 @@ def insert_team_goal_projection(
 ) -> None:
     """Persist one live team-goal model snapshot and its market comparisons."""
     model = projection.model
+    residuals_json = json.dumps(model.residuals, sort_keys=True) if isinstance(model.residuals, dict) else (model.residuals or "{}")
+    prov_json = json.dumps(model.market_provenance, sort_keys=True) if isinstance(model.market_provenance, dict) else (model.market_provenance or "{}")
     connection.execute(
         """
         INSERT INTO team_goal_model_snapshots (
             fixture_fpl_id, generated_at, provider_key, provider_event_ids,
             source_captured_at_min, source_captured_at_max, source_market_snapshot_count,
-            lambda_home, lambda_away, p_clean_sheet_home, p_clean_sheet_away, fit_loss
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            lambda_home, lambda_away, p_clean_sheet_home, p_clean_sheet_away, fit_loss,
+            residuals, market_provenance
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (fixture_fpl_id, generated_at) DO UPDATE SET
             provider_key = excluded.provider_key,
             provider_event_ids = excluded.provider_event_ids,
@@ -1570,7 +1838,9 @@ def insert_team_goal_projection(
             lambda_away = excluded.lambda_away,
             p_clean_sheet_home = excluded.p_clean_sheet_home,
             p_clean_sheet_away = excluded.p_clean_sheet_away,
-            fit_loss = excluded.fit_loss
+            fit_loss = excluded.fit_loss,
+            residuals = excluded.residuals,
+            market_provenance = excluded.market_provenance
         """,
         [
             projection.fixture_fpl_id,
@@ -1585,6 +1855,8 @@ def insert_team_goal_projection(
             model.p_clean_sheet_home,
             model.p_clean_sheet_away,
             projection.fit_loss,
+            residuals_json,
+            prov_json,
         ],
     )
     comparisons = [
@@ -1624,3 +1896,138 @@ def _timestamp_as_iso(value: object) -> str | None:
             return value.removesuffix("+00") + "Z"
         return value
     return value.isoformat().replace("+00:00", "Z")
+
+
+def insert_fixture_team_xg(
+    connection: duckdb.DuckDBPyConnection,
+    records: Iterable[FixtureTeamXG],
+) -> None:
+    """Persist fitted team xG records into team_goal_model_snapshots."""
+    data = [
+        (
+            record.fixture_fpl_id,
+            record.captured_at,
+            record.provider_key,
+            [],
+            record.captured_at,
+            record.captured_at,
+            1,
+            record.lambda_home,
+            record.lambda_away,
+            record.p_clean_sheet_home,
+            record.p_clean_sheet_away,
+            record.fit_loss,
+            json.dumps(record.residuals, sort_keys=True) if isinstance(record.residuals, dict) else (record.residuals or "{}"),
+            json.dumps(record.market_provenance, sort_keys=True) if isinstance(record.market_provenance, dict) else (record.market_provenance or "{}"),
+        )
+        for record in records
+    ]
+    if not data:
+        return
+    connection.executemany(
+        """
+        INSERT INTO team_goal_model_snapshots (
+            fixture_fpl_id, generated_at, provider_key, provider_event_ids,
+            source_captured_at_min, source_captured_at_max, source_market_snapshot_count,
+            lambda_home, lambda_away, p_clean_sheet_home, p_clean_sheet_away,
+            fit_loss, residuals, market_provenance
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (fixture_fpl_id, generated_at) DO UPDATE SET
+            provider_key = excluded.provider_key,
+            provider_event_ids = excluded.provider_event_ids,
+            source_captured_at_min = excluded.source_captured_at_min,
+            source_captured_at_max = excluded.source_captured_at_max,
+            source_market_snapshot_count = excluded.source_market_snapshot_count,
+            lambda_home = excluded.lambda_home,
+            lambda_away = excluded.lambda_away,
+            p_clean_sheet_home = excluded.p_clean_sheet_home,
+            p_clean_sheet_away = excluded.p_clean_sheet_away,
+            fit_loss = excluded.fit_loss,
+            residuals = excluded.residuals,
+            market_provenance = excluded.market_provenance
+        """,
+        data,
+    )
+
+
+def load_latest_fixture_team_xg(
+    connection: duckdb.DuckDBPyConnection,
+    fixture_fpl_id: int,
+    provider_key: str = "propline",
+) -> FixtureTeamXG | None:
+    """Load the latest fitted team xG for a fixture."""
+    row = connection.execute(
+        """
+        SELECT
+            fixture_fpl_id, provider_key, captured_at, lambda_home, lambda_away,
+            p_clean_sheet_home, p_clean_sheet_away, fit_loss, residuals, market_provenance
+        FROM fixture_team_xg
+        WHERE fixture_fpl_id = ? AND provider_key = ?
+        ORDER BY captured_at DESC
+        LIMIT 1
+        """,
+        [fixture_fpl_id, provider_key],
+    ).fetchone()
+    if row is None:
+        return None
+    (
+        f_id,
+        p_key,
+        c_at,
+        lh,
+        la,
+        pcs_h,
+        pcs_a,
+        loss,
+        res_str,
+        prov_str,
+    ) = row
+    return FixtureTeamXG(
+        fixture_fpl_id=f_id,
+        provider_key=p_key,
+        captured_at=c_at,
+        lambda_home=lh,
+        lambda_away=la,
+        p_clean_sheet_home=pcs_h,
+        p_clean_sheet_away=pcs_a,
+        fit_loss=loss,
+        residuals=json.loads(res_str) if isinstance(res_str, str) else res_str,
+        market_provenance=json.loads(prov_str) if isinstance(prov_str, str) else prov_str,
+    )
+
+
+def load_fixture_team_xg(
+    connection: duckdb.DuckDBPyConnection,
+    fixture_fpl_id: int | None = None,
+    provider_key: str = "propline",
+) -> list[FixtureTeamXG]:
+    """Load fitted team xG records, optionally filtered by fixture."""
+    query = """
+        SELECT
+            fixture_fpl_id, provider_key, captured_at, lambda_home, lambda_away,
+            p_clean_sheet_home, p_clean_sheet_away, fit_loss, residuals, market_provenance
+        FROM fixture_team_xg
+        WHERE provider_key = ?
+    """
+    params: list[object] = [provider_key]
+    if fixture_fpl_id is not None:
+        query += " AND fixture_fpl_id = ?"
+        params.append(fixture_fpl_id)
+    query += " ORDER BY fixture_fpl_id, captured_at DESC"
+    rows = connection.execute(query, params).fetchall()
+    return [
+        FixtureTeamXG(
+            fixture_fpl_id=f_id,
+            provider_key=p_key,
+            captured_at=c_at,
+            lambda_home=lh,
+            lambda_away=la,
+            p_clean_sheet_home=pcs_h,
+            p_clean_sheet_away=pcs_a,
+            fit_loss=loss,
+            residuals=json.loads(res_str) if isinstance(res_str, str) else res_str,
+            market_provenance=json.loads(prov_str) if isinstance(prov_str, str) else prov_str,
+        )
+        for f_id, p_key, c_at, lh, la, pcs_h, pcs_a, loss, res_str, prov_str in rows
+    ]
+

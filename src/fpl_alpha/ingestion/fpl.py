@@ -105,6 +105,7 @@ def player_history_from_gameweek_live(
             # The current bootstrap roster can include a player transferred in
             # after this gameweek; FPL's historical live payload has no row.
             # Do not fabricate a record against the player's current team.
+
             continue
         history.append(
             _player_history_from_live_stats(

@@ -40,6 +40,7 @@ load_dotenv()
 USER_AGENT = "fpl-alpha/0.1 (+https://github.com/RushiPardeshi)"
 
 # --- Secrets / IDs ----------------------------------------------------------
+ODDS_API_KEY = os.environ.get("ODDS_API_KEY")
 PROPLINE_API_KEY = os.environ.get("PROPLINE_API_KEY")
 FPL_TEAM_ID = os.environ.get("FPL_TEAM_ID")
 FPL_TEAM_ID_DEV2 = os.environ.get("FPL_TEAM_ID_DEV2")
@@ -54,6 +55,11 @@ class ProviderLimits:
     min_interval_s: float      # minimum seconds between live calls (throttle)
     cache_ttl_s: float         # serve cache younger than this without a live call
     note: str = ""
+    # Monthly usage budget, when the provider exposes one. The Odds API returns
+    # the authoritative running count in response headers, so cache.py tracks
+    # the real remaining credits rather than a counter we'd have to keep in sync.
+    monthly_budget: int | None = None      # total credits/requests per reset period
+    low_budget_threshold: int | None = None  # warn once remaining dips below this
 
 
 # Conservative defaults. Tighten, never loosen. TTLs mean "don't refetch within".
@@ -63,6 +69,16 @@ FPL_API = ProviderLimits(
     min_interval_s=1.0,        # be polite; endpoint can soft-ban a hammering IP
     cache_ttl_s=60 * 60 * 24,  # bootstrap changes ~daily
     note="public, no key; keep <=1 req/s",
+)
+
+THE_ODDS_API = ProviderLimits(
+    name="the-odds-api",
+    base_url="https://api.the-odds-api.com/v4",
+    min_interval_s=2.0,
+    cache_ttl_s=60 * 10,       # odds drift slowly; a 10-min TTL avoids re-spending credits
+    note="~500 credits/mo; credits = #markets x #regions per call (x10 for historical)",
+    monthly_budget=500,        # free-tier credits; consumed per markets x regions
+    low_budget_threshold=50,   # warn when <10% of the monthly budget remains
 )
 
 PROPLINE = ProviderLimits(
