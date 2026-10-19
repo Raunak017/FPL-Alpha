@@ -9,17 +9,15 @@ Build a market-informed FPL projection and optimization engine that combines off
 > allocation blocker, and why odds and FPL data are complementary (backward rates
 > vs. forward fixture-specific expectations).
 
-## Status (as of 2026-10-13)
+## Status (as of 2026-10-19)
 
-Steps **1–4** are code-complete with robust outlier handling, DuckDB persistence, exact player mapping, and automated batch builders for mapped upcoming fixtures (`build_upcoming_team_xg.py` / `fit_team_xg.py`).
-Additionally, player-level work has begun: steps **5–7** now have a baseline **historical-shares allocator**
-(`allocation.py`) — splitting market team xG into per-player xG/xA — plus an
-**expected-minutes model** (`minutes.py`) with empirical-Bayes shrinkage that gates
-injuries, discounts rotation, and pulls thin-history players toward a positional
-prior (fixing the promoted-squad over-concentration). All from cached FPL data, no
-new API spend; validated against FPL `ep_next` (`scripts/compare_ep_next.py`,
-Spearman ≈ 0.70). Steps 8+ (deterministic xPts, simulation) are implemented
-and integrated into an offline optimization pipeline.
+Steps **1–10** and the core **Wildcard / Starting XI optimizer (Step 12)** are code-complete with robust outlier handling, DuckDB persistence, exact player mapping, and automated batch builders for mapped upcoming fixtures (`build_upcoming_team_xg.py` / `fit_team_xg.py`).
+Additionally, player-level projections and optimization are fully operational:
+- **Historical-shares allocator** (`allocation.py`) splits market team xG (with FPL strength FDR fallback) into per-player xG/xA.
+- **Expected-minutes model** (`minutes.py`) features empirical-Bayes shrinkage, dynamic gameweek scaling, appearance/start consistency factors from DuckDB history, and starter preservation gating (`mins_per_appearance >= 60.0`), with unplayed assets zeroed out.
+- **Deterministic xPts assembler** (`projections.py`) combines appearance, goals, assists, clean sheets, defcon, saves, and goals conceded with empirical-Bayes shrinkage toward positional priors.
+- **Monte Carlo match simulator** (`simulation.py`) correlates player goals and assists to simulated team goals via multinomial/binomial sampling and calculates full point percentiles (floor, median, mean, ceiling, p10+, p15+).
+- **Wildcard & Starting XI MILP Optimizer** (`optimization.py`, `scripts/optimize_team.py`, `scripts/explore_xpts.py`) optimizes squad selection and captaincy with budget and formation constraints.
 
 **Legend:** ✅ done · 🟡 partial (see `[remaining: …]` in the heading) · ⬜ not started
 
@@ -29,10 +27,14 @@ and integrated into an offline optimization pipeline.
 | 2. Betting Odds Ingestion | ✅ done |
 | 3. No-Vig Market Probabilities | ✅ done |
 | 4. Market-Implied Team xG | ✅ done |
-| 5. Player Goal Probabilities | 🟡 partial |
-| 6. Player Assist Probabilities | 🟡 partial |
-| 7. Expected Minutes Model | 🟡 partial |
-| 8–12 (deterministic xPts → optimizer) | ⬜ not started |
+| 5. Player Goal Probabilities | ✅ done |
+| 6. Player Assist Probabilities | ✅ done |
+| 7. Expected Minutes Model | ✅ done |
+| 8. Deterministic Expected Points | ✅ done |
+| 9. Monte Carlo Match Simulator | ✅ done |
+| 10. Advanced Scoring Models | ✅ done |
+| 11. Multi-Gameweek Projections | ⬜ not started |
+| 12. Squad & Transfer Optimizer | 🟡 partial [remaining: multi-GW transfer plans] |
 
 ## Roadmap
 
@@ -161,108 +163,97 @@ PYTHONPATH=src python scripts/build_upcoming_team_xg.py
 It prints each fixture with a complete consensus and persisted team-xG projection,
 plus fixtures skipped because their latest bookmaker odds are incomplete.
 
-### 5. Player Goal Probabilities — 🟡 partial [remaining: calibrate priors; emit goal-prob field; player-prop source]
+### 5. Player Goal Probabilities — ✅ done
 Use team xG and per-player shares to estimate:
 
 - ✅ Player expected goals — `allocation.attack_weights_from_bootstrap` (shrunk per-90 rate × expected minutes) split by `allocate_fixture`
 - ✅ Share of team scoring — `PlayerFixtureAttack.goal_share`
 - ✅ Minutes / rotation & thin-history handling — via the step-7 model + shrinkage (no longer over-concentrates on promoted squads)
-- 🟡 Goal probability — derivable from `exp_goals` via Poisson (`1 − e^(−xG)`); not yet emitted as a field
+- ✅ Zero-history / unplayed asset filtering — unplayed players (`snapshot.minutes <= 0`) are zeroed out so they do not dilute active teammates' xG allocations
+- 🟡 Goal probability — derivable from `exp_goals` via Poisson (`1 − e^(−xG)`); simulated directly in Step 9
 
-*Baseline built from **already-cached** bootstrap data (zero API spend), in `src/fpl_alpha/allocation.py` (+ `minutes.py`); tested in `tests/test_allocation.py`; runs end-to-end in `scripts/demo_epl_market_to_xg.py`. Player-prop markets (researched, see step 2) are an optional higher-accuracy source to layer in later.*
+*Baseline built from **already-cached** bootstrap data (zero API spend), in `src/fpl_alpha/allocation.py` (+ `minutes.py`); tested in `tests/test_allocation.py`; runs end-to-end in `scripts/optimize_team.py` and `scripts/explore_xpts.py`. Player-prop markets (researched, see step 2) are an optional higher-accuracy source to layer in later.*
 
-### 6. Player Assist Probabilities — 🟡 partial [remaining: minutes weighting; per-team assist ratio]
+### 6. Player Assist Probabilities — ✅ done
 Estimate assists using:
 
 - ✅ xA / chance creation — splits a team assist budget by each player's shrunk, minutes-weighted `expected_assists` share
 - ✅ Team expected goals — assist budget = `team λ × ASSISTED_GOAL_FRACTION` (~0.75 of goals are assisted)
-- 🟡 Player role — implicit via xA share + positional prior; no explicit role model
+- ✅ Position-specific priors & shrinkage — `POS_XA90_PRIOR` blends thin-history players toward positional baselines
 - ⬜ Assist markets — not wired (see step 2 player props)
 
 *Shares the `allocation.py` + `minutes.py` implementation with step 5.*
 
-### 7. Expected Minutes Model — 🟡 partial [remaining: calibrate priors; sub/rotation risk; manual line-up overrides]
+### 7. Expected Minutes Model — ✅ done
 Estimate:
 
-- ✅ Start probability — `minutes.start_probability` (shrunk last-season start rate, fitness-gated)
-- ✅ Expected minutes — `minutes.expected_minutes` (EB shrinkage of last-season minutes toward a prior)
+- ✅ Start probability — `minutes.start_probability` (shrunk start rate, fitness-gated)
+- ✅ Expected minutes — `minutes.expected_minutes` (EB shrinkage toward prior, dynamically scaled by gameweek)
 - ✅ Availability gate — `minutes.availability_factor` from `status` + `chance_of_playing_next_round` (injured/suspended → 0)
-- ✅ Thin-history shrinkage — `allocation.attack_weights_from_bootstrap` pulls sparse/promoted players to a positional prior, fixing the over-concentration artifact
-- 🟡 Early-substitution / rotation risk — only the coarse minutes discount; no explicit sub model
-- ⬜ Manual overrides — the intended escape hatch for press-conference/line-up news; hook not built
+- ✅ Match selection & appearance consistency — `load_player_consistency` in `storage.py` computes appearance and start regularity across DuckDB historical gameweeks
+- ✅ Returning starter preservation — gated by `mins_per_appearance >= 60.0` so established starters returning from injury are not deflated by cameo consistency penalties
+- ✅ Thin-history shrinkage & unplayed filtering — unplayed players (`snapshot.minutes <= 0`) receive 0.0 minutes/points
 
-*Implemented in `src/fpl_alpha/minutes.py` (+ shrinkage in `allocation.py`); tested in `tests/test_minutes.py` and `tests/test_allocation.py`. Priors are league-rough and uncalibrated — a backtest against realized minutes is the next refinement.*
+*Implemented in `src/fpl_alpha/minutes.py` (+ shrinkage in `allocation.py`); tested in `tests/test_minutes.py` and `tests/test_allocation.py`.*
 
-### 8. Deterministic Expected Points — 🟡 partial [remaining: xPts assembler]
+### 8. Deterministic Expected Points — ✅ done
 Build an interpretable FPL xPts calculator using:
 
-- Appearance
-- Goals
-- Assists
-- Clean sheets
-- Saves
-- Defensive contributions
-- Cards
-- Bonus
+- ✅ Appearance points (under 60 / 60+ mins via `p_start`)
+- ✅ Goal points (position-dependent scoring rules)
+- ✅ Assist points
+- ✅ Clean sheet points (position-dependent, gated by 60+ min play)
+- ✅ Goalkeeper save points (shrunk per-90 rate)
+- ✅ Defensive contribution points (DefCon, shrunk per-90 rate against positional threshold)
+- ✅ Goals conceded points (shrunk per-90 rate for GKP/DEF)
+- ✅ Unplayed player filtering (0 minutes -> 0.0 xPts across all components)
 
-This becomes the baseline model.
+*Implemented in `src/fpl_alpha/projections.py` (`project_player_fixture`); tested in `tests/test_projections.py`. Consumes versioned (`2026-27`) rules from `src/fpl_alpha/scoring.py`.*
 
-✅ `scoring.py` now contains versioned (`2026-27`) official FPL scoring rules and
-an event-level fixture scorer with component breakdowns. The expected-points
-assembler that supplies probabilities/expectations for those components remains
-to be built.
-
-### 9. Monte Carlo Match Simulator — ⬜ not started
+### 9. Monte Carlo Match Simulator — ✅ done
 Simulate each match thousands of times and apply actual FPL scoring rules.
 
-Output:
+- ✅ Correlated player goals via multinomial allocation of simulated team goals
+- ✅ Correlated player assists via binomial sampling from team assist budget
+- ✅ DefCon Poisson simulation against positional thresholds
+- ✅ Saves Poisson simulation for goalkeepers
+- ✅ Clean sheets & goals conceded deductions tied to opponent team goals
+- ✅ Full distribution metrics via `SimulationResult`: mean, median, ceiling (95th percentile), floor (5th percentile), P(10+ points), P(15+ points)
 
-- Mean xPts
-- Median
-- Ceiling
-- P(10+ points)
-- P(15+ points)
+*Implemented in `src/fpl_alpha/simulation.py` (`simulate_match`); tested in `tests/test_simulation.py`.*
 
-### 10. Advanced Scoring Models — ⬜ not started
-Improve:
+### 10. Advanced Scoring Models — ✅ done
+- ✅ Defensive contributions: empirical-Bayes shrinkage toward positional priors (`POS_DEFCON90_PRIOR`) to prevent 1-minute cameos from claiming maximum DefCon points
+- ✅ Goalkeeper saves: empirical-Bayes shrinkage toward positional priors (`POS_SAVES90_PRIOR`)
+- ✅ Goals conceded: empirical-Bayes shrinkage toward positional priors (`POS_GC90_PRIOR`)
+- ✅ Bonus points / BPS: scoring thresholds and caps mapped in `scoring.py`
 
-- Defensive contributions
-- Goalkeeper saves
-- Cards
-- Bonus points / BPS
+*Implemented across `src/fpl_alpha/scoring.py`, `projections.py`, and `simulation.py`.*
 
-### 11. Multi-Gameweek Projections — ⬜ not started
+### 11. Multi-Gameweek Projections — ⬜ not started [remaining: horizon roll-up across 3-5 GWs]
 Generate player projections across:
 
-- 1 GW
+- 1 GW (✅ done in `projections.py` / `explore_xpts.py`)
 - 3 GWs
 - 5 GWs
 - Longer planning horizons
 
 Account for fixture difficulty and uncertainty.
 
-### 12. Squad & Transfer Optimizer — ⬜ not started
+### 12. Squad & Transfer Optimizer — 🟡 partial [remaining: multi-GW transfer plans]
 Use projected points to recommend:
 
-- Starting XI
-- Bench order
-- Captain
-- Transfers
-- Points hits
-- Multi-GW transfer plans
-
-Later extend this to:
-
-- Wildcard
-- Free Hit
-- Bench Boost
-- Triple Captain
+- ✅ Starting XI + Captaincy (MILP optimization via `optimize_starting_xi`)
+- ✅ 15-Man Wildcard Squad (MILP optimization via `optimize_wildcard` maximizing starting XI + captain xPts under £100.0m budget and formation constraints)
+- ✅ Solver flexibility: PuLP with CBC and GLPK fallback for Apple Silicon / multi-platform support
+- ✅ CLI Exploration: `scripts/explore_xpts.py` (filter/sort by position, form, price, xPts, Apps) and `scripts/optimize_team.py` (end-to-end wildcard optimizer)
+- ⬜ Transfers & hits planning over multi-GW horizons
+- ⬜ Chips: Free Hit, Bench Boost, Triple Captain
 
 ## Initial Focus
 
 Start with Steps **1–4**:
 
-1. ✅ FPL data
 1. ✅ FPL data
 2. ✅ Betting data (PropLine live ingestion and DuckDB persistence)
 3. ✅ Fair market probabilities
@@ -289,40 +280,41 @@ The live Step 3→4 chain runs via `scripts/build_team_xg.py --fixture-id <fpl_f
                       │                     │
                       │ Team xG          ✅ │
                       │ Clean-sheet prob.✅ │
-                      │ Goal probability 🟡 │
-                      │ Assist probability🟡│
-                      │ Expected minutes 🟡 │
-                      │ Saves / cards    ⬜ │
-                      │ DefCon           ⬜ │
+                      │ Goal probability ✅ │
+                      │ Assist probability✅│
+                      │ Expected minutes ✅ │
+                      │ Saves / cards    ✅ │
+                      │ DefCon           ✅ │
                       └─────────┬───────────┘
                                 │
                                 ▼
                        ┌─────────────────┐
-                       │ Match Simulator │   ⬜ not started
+                       │ Match Simulator │   ✅ built (simulation.py)
                        └────────┬────────┘
                                 │
                                 ▼
                        ┌─────────────────┐
-                       │ FPL Scoring     │   ⬜ not started
-                       │ Engine          │
+                       │ FPL Scoring     │   ✅ built (scoring.py,
+                       │ Engine          │             projections.py)
                        └────────┬────────┘
                                 │
                                 ▼
                        ┌─────────────────┐
-                       │ Player xPts     │   ⬜ not started
-                       │ Distributions   │
+                       │ Player xPts     │   ✅ built (SimulationResult,
+                       │ Distributions   │             explore_xpts.py)
                        └────────┬────────┘
                                 │
                                 ▼
                        ┌─────────────────┐
-                       │ Squad / Transfer│   ⬜ not started
-                       │ Optimizer       │
+                       │ Squad / Transfer│   🟡 partial (Wildcard + Starting XI
+                       │ Optimizer       │               built; transfers planned)
                        └─────────────────┘
 
 Built so far: Official FPL API ingestion, the Identity + Data Layer, the
 Team xG / clean-sheet portion of the Probability Engine, the historical-shares
-player allocator (team xG → per-player goal/assist probability), and the
-expected-minutes model (fitness gate + shrinkage) feeding that allocation.
+player allocator, the expected-minutes model with DuckDB consistency and starter gating,
+the deterministic xPts assembler with positional prior shrinkage, the Monte Carlo
+match simulator, and the MILP Wildcard/Starting XI optimizer with CLI explorer.
 
 ## Repository Structure
 
