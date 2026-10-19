@@ -39,17 +39,18 @@ def main():
     fpl_fixtures_path = RAW / "fpl" / "fixtures.json"
     gameweek_fixtures = [f for f in fpl.fixtures_from_api(json.loads(fpl_fixtures_path.read_text())) if f.event == target_gameweek]
     
-    rates = attack_weights_from_bootstrap(boot, games_played=games_played)
+    from fpl_alpha.storage import open_database, load_player_consistency
+    from fpl_alpha.team_xg import resolve_fixture_team_goals
+    conn = open_database()
+    consistencies = load_player_consistency(conn, games_played=games_played, max_gameweek=int(games_played))
+
+    rates = attack_weights_from_bootstrap(boot, games_played=games_played, consistencies=consistencies)
     el = {e["id"]: e for e in boot["elements"]}
     POS = {1: "GKP", 2: "DEF", 3: "MID", 4: "FWD"}
     
     now_utc = datetime.now(timezone.utc)
     snapshots = {s.player_fpl_id: s for s in player_snapshots_from_bootstrap(boot, now_utc)}
     results = []
-    
-    from fpl_alpha.storage import open_database
-    from fpl_alpha.team_xg import resolve_fixture_team_goals
-    conn = open_database()
 
     for fixture in gameweek_fixtures:
         home_team = next(t for t in teams if t.fpl_id == fixture.team_h_fpl_id)
@@ -86,12 +87,23 @@ def main():
             if args.max_price and cost > args.max_price: continue
             if args.min_form and form < args.min_form: continue
             
+            snapshot = snapshots[r.fpl_id]
+            if snapshot.minutes <= 0:
+                continue
+
             dummy_player = Player(
                 fpl_id=r.fpl_id, web_name=e["web_name"], full_name="", 
                 team_fpl_id=r.team_fpl_id, position=pos, now_cost=e["now_cost"]
             )
-            snapshot = snapshots[r.fpl_id]
-            proj = project_player_fixture(dummy_player, snapshot, r, cs[r.team_fpl_id], games_played=games_played)
+            cons = consistencies.get(r.fpl_id)
+            proj = project_player_fixture(
+                dummy_player,
+                snapshot,
+                r,
+                cs[r.team_fpl_id],
+                games_played=games_played,
+                consistency=cons,
+            )
             
             if proj.expected_points > 0:
                 results.append({
@@ -104,6 +116,7 @@ def main():
                     "xpts": proj.expected_points,
                     "xg": r.exp_goals,
                     "xa": r.exp_assists,
+                    "apps": cons.matches_played if cons else (1 if snapshot.minutes > 0 else 0),
                     "mins": int(snapshot.minutes),
                     "saves_90": _f(e.get("saves_per_90"))
                 })
@@ -121,10 +134,10 @@ def main():
         
     results = results[:args.limit]
     
-    print(f"{'Player':<15} | {'Team':<4} | {'Pos':<3} | {'Opp':<7} | {'£':<4} | {'Form':<4} | {'xG':<4} | {'xA':<4} | {'xPts':<5}")
-    print("-" * 75)
+    print(f"{'Player':<15} | {'Team':<4} | {'Pos':<3} | {'Opp':<7} | {'£':<4} | {'Apps':<4} | {'Form':<4} | {'xG':<4} | {'xA':<4} | {'xPts':<5}")
+    print("-" * 82)
     for r in results:
-        print(f"{r['name']:<15} | {r['team']:<4} | {r['pos']:<3} | {r['opp']:<7} | £{r['cost']:<3.1f} | {r['form']:<4.1f} | {r['xg']:<4.2f} | {r['xa']:<4.2f} | {r['xpts']:<5.2f}")
+        print(f"{r['name']:<15} | {r['team']:<4} | {r['pos']:<3} | {r['opp']:<7} | £{r['cost']:<3.1f} | {r['apps']:<4} | {r['form']:<4.1f} | {r['xg']:<4.2f} | {r['xa']:<4.2f} | {r['xpts']:<5.2f}")
 
 if __name__ == "__main__":
     main()

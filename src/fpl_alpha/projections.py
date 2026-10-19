@@ -13,12 +13,20 @@ from typing import Iterable
 from fpl_alpha.minutes import availability_factor, start_probability
 from fpl_alpha.schemas import (
     Player,
+    PlayerConsistency,
     PlayerFixtureAttack,
     PlayerFixtureProjection,
     PlayerSnapshot,
     TeamGoalModel,
 )
 from fpl_alpha.scoring import CURRENT_RULESET, FPLScoringRules
+
+
+from fpl_alpha.allocation import shrink_rate
+
+POS_DEFCON90_PRIOR = {"GKP": 0.0, "DEF": 7.5, "MID": 8.0, "FWD": 4.0, "UNK": 6.0}
+POS_SAVES90_PRIOR = {"GKP": 3.0, "DEF": 0.0, "MID": 0.0, "FWD": 0.0, "UNK": 0.0}
+POS_GC90_PRIOR = {"GKP": 1.3, "DEF": 1.3, "MID": 0.0, "FWD": 0.0, "UNK": 0.0}
 
 
 def project_player_fixture(
@@ -31,15 +39,53 @@ def project_player_fixture(
     run_id: str = "run_0",
     gameweek: int = 0,
     games_played: float = 38.0,
+    consistency: PlayerConsistency | None = None,
     rules: FPLScoringRules = CURRENT_RULESET,
 ) -> PlayerFixtureProjection:
     """Assemble deterministic baseline xPts for a single player in one fixture."""
     from fpl_alpha.minutes import expected_minutes as calc_expected_minutes
     
+    # Zero-history / unplayed players: if they haven't played, no xPts
+    if snapshot.minutes <= 0:
+        return PlayerFixtureProjection(
+            run_id=run_id,
+            gameweek=gameweek,
+            player_fpl_id=player.fpl_id,
+            fixture_fpl_id=fixture_fpl_id,
+            expected_points=0.0,
+            expected_goals=0.0,
+            expected_assists=0.0,
+            p_start=0.0,
+            p_60_plus=0.0,
+            p_clean_sheet=p_clean_sheet,
+            appearance_points=0.0,
+            goal_points=0.0,
+            assist_points=0.0,
+            clean_sheet_points=0.0,
+            save_points=0.0,
+            defensive_contribution_points=0.0,
+            goals_conceded_points=0.0,
+            bonus_points=0.0,
+        )
+
     # Minutes model
     avail = availability_factor(snapshot.status, snapshot.chance_of_playing_next_round)
-    p_start = start_probability(snapshot.starts, snapshot.minutes, avail, games_played=games_played)
-    exp_mins = calc_expected_minutes(snapshot.minutes, avail, games_played=games_played)
+    matches_played = consistency.matches_played if consistency is not None else None
+    matches_started = consistency.matches_started if consistency is not None else None
+    p_start = start_probability(
+        snapshot.starts,
+        snapshot.minutes,
+        avail,
+        games_played=games_played,
+        matches_started=matches_started,
+        matches_played=matches_played,
+    )
+    exp_mins = calc_expected_minutes(
+        snapshot.minutes,
+        avail,
+        games_played=games_played,
+        matches_played=matches_played,
+    )
     
     # We roughly approximate P(60') as P(start) for the baseline.
     p_60 = p_start
@@ -55,14 +101,31 @@ def project_player_fixture(
     # Clean sheet requires 60+ minutes
     cs_pts = p_60 * p_clean_sheet * rules.clean_sheet_points.get(player.position, 0)
 
+    mins = max(0.0, float(snapshot.minutes))
+    shrunk_defcon = shrink_rate(
+        snapshot.defensive_contribution_per_90,
+        mins,
+        POS_DEFCON90_PRIOR.get(player.position, 6.0),
+    )
+    shrunk_saves = shrink_rate(
+        snapshot.saves_per_90,
+        mins,
+        POS_SAVES90_PRIOR.get(player.position, 0.0),
+    )
+    shrunk_gc = shrink_rate(
+        snapshot.goals_conceded_per_90,
+        mins,
+        POS_GC90_PRIOR.get(player.position, 0.0),
+    )
+
     defcon_pts = expected_defcon_points(
-        player.position, snapshot.defensive_contribution_per_90, exp_mins, rules=rules
+        player.position, shrunk_defcon, exp_mins, rules=rules
     )
     save_pts = expected_save_points(
-        player.position, snapshot.saves_per_90, exp_mins, rules=rules
+        player.position, shrunk_saves, exp_mins, rules=rules
     )
     gc_pts = expected_goals_conceded_points(
-        player.position, snapshot.goals_conceded_per_90, exp_mins, rules=rules
+        player.position, shrunk_gc, exp_mins, rules=rules
     )
 
     total_xpts = appearance_pts + goal_pts + assist_pts + cs_pts + defcon_pts + save_pts + gc_pts

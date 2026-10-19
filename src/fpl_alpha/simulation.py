@@ -16,14 +16,9 @@ from fpl_alpha.schemas import (
     PlayerFixtureAttack,
     TeamGoalModel,
 )
-from fpl_alpha.allocation import ASSISTED_GOAL_FRACTION
+from fpl_alpha.allocation import ASSISTED_GOAL_FRACTION, shrink_rate
 from fpl_alpha.minutes import availability_factor, start_probability, expected_minutes
-from fpl_alpha.schemas import (
-    Player,
-    PlayerSnapshot,
-    PlayerFixtureAttack,
-    TeamGoalModel,
-)
+from fpl_alpha.projections import POS_DEFCON90_PRIOR, POS_SAVES90_PRIOR
 from fpl_alpha.scoring import CURRENT_RULESET, FPLScoringRules
 
 @dataclass(frozen=True)
@@ -124,8 +119,14 @@ def _simulate_team_players(
     exp_mins = np.array(exp_mins_list)
 
     # Defcon / Saves
-    defcon_per_90 = np.array([snap.defensive_contribution_per_90 for _, snap, _ in players_data])
-    saves_per_90 = np.array([snap.saves_per_90 for _, snap, _ in players_data])
+    defcon_per_90 = np.array([
+        shrink_rate(snap.defensive_contribution_per_90, snap.minutes, POS_DEFCON90_PRIOR.get(p.position, 6.0))
+        for p, snap, _ in players_data
+    ])
+    saves_per_90 = np.array([
+        shrink_rate(snap.saves_per_90, snap.minutes, POS_SAVES90_PRIOR.get(p.position, 0.0))
+        for p, snap, _ in players_data
+    ])
 
     defcon_lam = defcon_per_90 * (exp_mins / 90.0)
     saves_lam = saves_per_90 * (exp_mins / 90.0)
