@@ -58,7 +58,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .minutes import FULL_MATCH, availability_factor, expected_minutes
-from .schemas import PlayerFixtureAttack, PlayerRates, TeamGoalModel
+from .schemas import PlayerConsistency, PlayerFixtureAttack, PlayerRates, TeamGoalModel
 
 __all__ = [
     "ASSISTED_GOAL_FRACTION",
@@ -202,6 +202,7 @@ def attack_weights_from_bootstrap(
     *,
     gate_availability: bool = True,
     games_played: float = 38.0,
+    consistencies: Mapping[int, PlayerConsistency] | None = None,
 ) -> dict[int, PlayerRates]:
     """Per-match attacking weights with minutes + shrinkage (Plan steps 5-7).
     """
@@ -214,7 +215,9 @@ def attack_weights_from_bootstrap(
             if gate_availability
             else 1.0
         )
-        emin = expected_minutes(mins, avail, games_played=games_played)
+        cons = consistencies.get(e["id"]) if consistencies else None
+        m_played = cons.matches_played if cons is not None else None
+        emin = expected_minutes(mins, avail, games_played=games_played, matches_played=m_played)
         play_frac = emin / FULL_MATCH
         wx = shrink_rate(_to_float(e.get("expected_goals_per_90")), mins, POS_XG90_PRIOR[pos]) * play_frac
         wa = shrink_rate(_to_float(e.get("expected_assists_per_90")), mins, POS_XA90_PRIOR[pos]) * play_frac

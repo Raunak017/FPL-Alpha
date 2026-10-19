@@ -48,21 +48,59 @@ def availability_factor(status: str | None, chance_next: float | int | None) -> 
     return 0.0 if status in _UNAVAILABLE_STATUS else 1.0
 
 
+def appearance_consistency_factor(
+    matches_played: float,
+    games_played: float,
+    *,
+    prior: float = 0.5,
+    k_games: float = 1.0,
+) -> float:
+    """Empirical-Bayes consistency factor in [0, 1] reflecting manager selection regularity.
+
+    Measures how consistently the player actually features in matches across the season,
+    penalizing fringe cameos and unused reserves while respecting regular rotation.
+    """
+    g = max(0.0, float(games_played))
+    if g <= 0:
+        return prior
+    m = max(0.0, min(g, float(matches_played)))
+    return min(1.0, max(0.0, (m + k_games * prior) / (g + k_games)))
+
+
+def start_consistency_factor(
+    matches_started: float,
+    games_played: float,
+    *,
+    prior: float = PRIOR_START,
+    k_games: float = 1.0,
+) -> float:
+    """Empirical-Bayes start consistency in [0, 1] reflecting starting lineup regularity."""
+    g = max(0.0, float(games_played))
+    if g <= 0:
+        return prior
+    s = max(0.0, min(g, float(matches_started)))
+    return min(1.0, max(0.0, (s + k_games * prior) / (g + k_games)))
+
+
 def expected_minutes(
     minutes_total: float,
     availability: float,
     games_played: float = 38.0,
     *,
+    matches_played: float | None = None,
     prior: float = PRIOR_MINUTES,
     k: float = K_MINUTES,
 ) -> float:
-    """Per-fixture expected minutes in [0, 90]: fitness-gated, shrunk to ``prior``.
+    """Per-fixture expected minutes in [0, 90]: fitness-gated, shrunk to ``prior`` and consistency-scaled.
     """
     mins = max(0.0, float(minutes_total))
     games = max(1.0, float(games_played))
     mpg = min(FULL_MATCH, mins / games)
     w = mins / (mins + k) if (mins + k) > 0 else 0.0
     est = w * mpg + (1.0 - w) * prior
+    if matches_played is not None:
+        cf = appearance_consistency_factor(matches_played, games)
+        est = est * cf
     return availability * min(FULL_MATCH, est)
 
 
@@ -72,14 +110,22 @@ def start_probability(
     availability: float,
     games_played: float = 38.0,
     *,
+    matches_started: float | None = None,
+    matches_played: float | None = None,
     prior: float = PRIOR_START,
     k: float = K_MINUTES,
 ) -> float:
-    """Probability of starting in [0, 1]: fitness-gated, shrunk to ``prior``.
+    """Probability of starting in [0, 1]: fitness-gated, shrunk to ``prior`` and consistency-scaled.
     """
     mins = max(0.0, float(minutes_total))
     games = max(1.0, float(games_played))
     rate = min(1.0, max(0.0, float(starts_total)) / games)
     w = mins / (mins + k) if (mins + k) > 0 else 0.0
     est = w * rate + (1.0 - w) * prior
+    if matches_started is not None:
+        sf = start_consistency_factor(matches_started, games, prior=prior)
+        est = min(est, sf)
+    if matches_played is not None:
+        cf = appearance_consistency_factor(matches_played, games)
+        est = min(est, cf)
     return availability * min(1.0, est)

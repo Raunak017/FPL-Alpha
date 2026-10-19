@@ -27,6 +27,7 @@ from .schemas import (
     OddsPlayerMapping,
     OddsProviderEvent,
     Player,
+    PlayerConsistency,
     PlayerFixtureProjection,
     PlayerGameweekHistory,
     PlayerSnapshot,
@@ -987,6 +988,54 @@ def load_players(connection: duckdb.DuckDBPyConnection) -> list[Player]:
             """
         ).fetchall()
     ]
+
+
+def load_player_consistency(
+    connection: duckdb.DuckDBPyConnection,
+    *,
+    games_played: float | None = None,
+    max_gameweek: int | None = None,
+) -> dict[int, PlayerConsistency]:
+    """Compute per-player appearance and start consistency from past gameweek logs."""
+    where_clause = ""
+    params: list[Any] = []
+    if max_gameweek is not None:
+        where_clause = "WHERE gameweek <= ?"
+        params.append(max_gameweek)
+
+    query = f"""
+        SELECT 
+            player_fpl_id,
+            COUNT(CASE WHEN minutes > 0 THEN 1 END) AS matches_played,
+            COUNT(CASE WHEN starts > 0 THEN 1 END) AS matches_started,
+            COALESCE(SUM(minutes), 0) AS total_minutes
+        FROM player_gameweek_history
+        {where_clause}
+        GROUP BY player_fpl_id
+    """
+    rows = connection.execute(query, params).fetchall()
+
+    if games_played is None:
+        if max_gameweek is not None:
+            g = float(max_gameweek)
+        else:
+            gw_row = connection.execute("SELECT MAX(gameweek) FROM player_gameweek_history").fetchone()
+            g = float(gw_row[0]) if gw_row and gw_row[0] is not None else 1.0
+    else:
+        g = float(games_played)
+
+    g = max(1.0, g)
+
+    return {
+        row[0]: PlayerConsistency(
+            player_fpl_id=row[0],
+            matches_played=int(row[1]),
+            matches_started=int(row[2]),
+            total_minutes=int(row[3]),
+            games_played=g,
+        )
+        for row in rows
+    }
 
 
 def upsert_odds_provider_events(

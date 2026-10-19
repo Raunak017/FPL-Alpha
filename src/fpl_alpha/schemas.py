@@ -138,6 +138,32 @@ class PlayerGameweekHistory:
 
 
 @dataclass(frozen=True)
+class PlayerConsistency:
+    """Match selection and appearance regularity across past gameweeks."""
+
+    player_fpl_id: int
+    matches_played: int
+    matches_started: int
+    total_minutes: int
+    games_played: float
+
+    @property
+    def appearance_consistency(self) -> float:
+        """Fraction of team gameweeks where the player actually appeared on the pitch."""
+        return min(1.0, max(0.0, self.matches_played / self.games_played)) if self.games_played > 0 else 0.0
+
+    @property
+    def start_consistency(self) -> float:
+        """Fraction of team gameweeks where the player was in the starting XI."""
+        return min(1.0, max(0.0, self.matches_started / self.games_played)) if self.games_played > 0 else 0.0
+
+    @property
+    def mins_per_appearance(self) -> float:
+        """Average minutes played per match in which the player was featured."""
+        return self.total_minutes / self.matches_played if self.matches_played > 0 else 0.0
+
+
+@dataclass(frozen=True)
 class Fixture:
     """Canonical FPL fixture record used by persistence and downstream stages."""
 

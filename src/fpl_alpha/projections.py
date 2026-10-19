@@ -13,6 +13,7 @@ from typing import Iterable
 from fpl_alpha.minutes import availability_factor, start_probability
 from fpl_alpha.schemas import (
     Player,
+    PlayerConsistency,
     PlayerFixtureAttack,
     PlayerFixtureProjection,
     PlayerSnapshot,
@@ -38,6 +39,7 @@ def project_player_fixture(
     run_id: str = "run_0",
     gameweek: int = 0,
     games_played: float = 38.0,
+    consistency: PlayerConsistency | None = None,
     rules: FPLScoringRules = CURRENT_RULESET,
 ) -> PlayerFixtureProjection:
     """Assemble deterministic baseline xPts for a single player in one fixture."""
@@ -45,8 +47,22 @@ def project_player_fixture(
     
     # Minutes model
     avail = availability_factor(snapshot.status, snapshot.chance_of_playing_next_round)
-    p_start = start_probability(snapshot.starts, snapshot.minutes, avail, games_played=games_played)
-    exp_mins = calc_expected_minutes(snapshot.minutes, avail, games_played=games_played)
+    matches_played = consistency.matches_played if consistency is not None else None
+    matches_started = consistency.matches_started if consistency is not None else None
+    p_start = start_probability(
+        snapshot.starts,
+        snapshot.minutes,
+        avail,
+        games_played=games_played,
+        matches_started=matches_started,
+        matches_played=matches_played,
+    )
+    exp_mins = calc_expected_minutes(
+        snapshot.minutes,
+        avail,
+        games_played=games_played,
+        matches_played=matches_played,
+    )
     
     # We roughly approximate P(60') as P(start) for the baseline.
     p_60 = p_start

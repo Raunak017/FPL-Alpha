@@ -324,3 +324,43 @@ def test_projection_runs_are_immutable_deduplicated_and_selectable(tmp_path):
     assert stored_runs == 2
     assert stored_rows == 4
     assert selected == [(10, 4.2), (11, 3.1)]
+
+
+def test_load_player_consistency(tmp_path):
+    from fpl_alpha.schemas import PlayerGameweekHistory
+    from fpl_alpha.storage import load_player_consistency, upsert_player_gameweek_history
+
+    connection = open_database(tmp_path / "fpl_alpha.duckdb")
+    try:
+        histories = [
+            # Player 1: started 2 of 2 games
+            PlayerGameweekHistory(1, 101, 1, None, 2, True, 2, 0, 90, 6, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 20, 1.0, 1.0, 1.0, 1.0, 1, 0.1, 0.1, 0.2, 0.0, None, None, None, None, None),
+            PlayerGameweekHistory(1, 102, 2, None, 3, False, 1, 1, 85, 2, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 15, 1.0, 1.0, 1.0, 1.0, 1, 0.1, 0.1, 0.2, 0.0, None, None, None, None, None),
+            # Player 2: cameo in GW1 (3 mins), unused in GW2 (0 mins)
+            PlayerGameweekHistory(2, 101, 1, None, 2, True, 2, 0, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 0.5, 0.0, 0.0, 0.1, 0, 0.0, 0.0, 0.0, 0.0, None, None, None, None, None),
+            PlayerGameweekHistory(2, 102, 2, None, 3, False, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, None, None, None, None, None),
+        ]
+        upsert_player_gameweek_history(connection, histories)
+        cons = load_player_consistency(connection, games_played=2.0)
+
+        assert 1 in cons
+        assert 2 in cons
+
+        p1 = cons[1]
+        assert p1.matches_played == 2
+        assert p1.matches_started == 2
+        assert p1.total_minutes == 175
+        assert p1.appearance_consistency == 1.0
+        assert p1.start_consistency == 1.0
+        assert p1.mins_per_appearance == 87.5
+
+        p2 = cons[2]
+        assert p2.matches_played == 1
+        assert p2.matches_started == 0
+        assert p2.total_minutes == 3
+        assert p2.appearance_consistency == 0.5
+        assert p2.start_consistency == 0.0
+        assert p2.mins_per_appearance == 3.0
+    finally:
+        connection.close()
+
