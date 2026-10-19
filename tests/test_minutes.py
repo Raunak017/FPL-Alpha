@@ -109,3 +109,14 @@ def test_expected_minutes_and_start_prob_with_cameo_consistency():
     assert exp_mins < 10.0
     assert p_start < 0.10
 
+
+def test_expected_minutes_and_start_prob_injured_starter_not_crushed():
+    # Returning starter scenario: started all 3 matches played (90 mpg) out of 6 team games
+    exp_mins = expected_minutes(270, 1.0, games_played=6.0, matches_played=3)
+    p_start = start_probability(3, 270, 1.0, games_played=6.0, matches_started=3, matches_played=3)
+
+    # Must preserve starter status (not crushed to ~22 mins / ~49% start prob)
+    assert exp_mins > 55.0
+    assert p_start > 0.60
+
+

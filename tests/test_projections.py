@@ -113,3 +113,46 @@ def test_project_player_fixture_shrinks_cameo_defcon():
     assert proj.defensive_contribution_points < 0.1
     assert proj.expected_points < 2.0
 
+
+def test_project_player_fixture_zero_minutes_returns_zero():
+    """Players who have not played (0 minutes) should receive 0.0 xPts and 0 expected minutes."""
+    player = Player(
+        fpl_id=999, web_name="Reserve", full_name="Reserve Player",
+        team_fpl_id=1, position="MID", now_cost=45
+    )
+    snapshot = PlayerSnapshot(
+        player_fpl_id=999, captured_at=datetime.now(timezone.utc),
+        now_cost=45, selected_by_percent=0.1, status="a",
+        total_points=0, points_per_game=0.0, form=0.0,
+        minutes=0, starts=0, goals_scored=0, assists=0,
+        clean_sheets=0, bonus=0, bps=0,
+        expected_goals=0.0, expected_assists=0.0, expected_goal_involvements=0.0,
+        expected_goals_conceded=0.0, clean_sheets_per_90=0.0,
+        defensive_contribution_per_90=0.0, expected_goals_per_90=0.0,
+        expected_assists_per_90=0.0, expected_goal_involvements_per_90=0.0,
+        expected_goals_conceded_per_90=0.0, goals_conceded_per_90=0.0,
+        saves_per_90=0.0, starts_per_90=0.0, influence=0.0,
+        creativity=0.0, threat=0.0, ict_index=0.0,
+        chance_of_playing_next_round=None, chance_of_playing_this_round=None,
+        transfers_in_event=0, transfers_out_event=0,
+        transfers_in=0, transfers_out=0
+    )
+    attack = PlayerFixtureAttack(
+        fpl_id=999, fixture_id="F1", team_fpl_id=1,
+        exp_goals=0.0, exp_assists=0.0
+    )
+
+    proj = project_player_fixture(
+        player=player,
+        snapshot=snapshot,
+        attack=attack,
+        p_clean_sheet=0.3,
+        games_played=6.0,
+    )
+
+    assert proj.expected_points == 0.0
+    assert proj.p_start == 0.0
+    assert proj.appearance_points == 0.0
+    assert proj.p_60_plus == 0.0
+
+

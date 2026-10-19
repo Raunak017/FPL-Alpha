@@ -217,7 +217,10 @@ def attack_weights_from_bootstrap(
         )
         cons = consistencies.get(e["id"]) if consistencies else None
         m_played = cons.matches_played if cons is not None else None
-        emin = expected_minutes(mins, avail, games_played=games_played, matches_played=m_played)
+        if consistencies is not None and (mins <= 0 or (cons is not None and cons.matches_played == 0)):
+            emin = 0.0
+        else:
+            emin = expected_minutes(mins, avail, games_played=games_played, matches_played=m_played)
         play_frac = emin / FULL_MATCH
         wx = shrink_rate(_to_float(e.get("expected_goals_per_90")), mins, POS_XG90_PRIOR[pos]) * play_frac
         wa = shrink_rate(_to_float(e.get("expected_assists_per_90")), mins, POS_XA90_PRIOR[pos]) * play_frac

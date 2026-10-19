@@ -87,11 +87,14 @@ def main():
             if args.max_price and cost > args.max_price: continue
             if args.min_form and form < args.min_form: continue
             
+            snapshot = snapshots[r.fpl_id]
+            if snapshot.minutes <= 0:
+                continue
+
             dummy_player = Player(
                 fpl_id=r.fpl_id, web_name=e["web_name"], full_name="", 
                 team_fpl_id=r.team_fpl_id, position=pos, now_cost=e["now_cost"]
             )
-            snapshot = snapshots[r.fpl_id]
             cons = consistencies.get(r.fpl_id)
             proj = project_player_fixture(
                 dummy_player,

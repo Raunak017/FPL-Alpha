@@ -37,15 +37,16 @@ def main():
     fpl_fixtures_path = RAW / "fpl" / "fixtures.json"
     gameweek_fixtures = [f for f in fpl.fixtures_from_api(json.loads(fpl_fixtures_path.read_text())) if f.event == target_gameweek]
     
-    rates = attack_weights_from_bootstrap(boot, games_played=games_played)
+    from fpl_alpha.storage import open_database, load_player_consistency
+    from fpl_alpha.team_xg import resolve_fixture_team_goals
+    conn = open_database()
+    consistencies = load_player_consistency(conn, games_played=games_played, max_gameweek=int(games_played))
+
+    rates = attack_weights_from_bootstrap(boot, games_played=games_played, consistencies=consistencies)
     el = {e["id"]: e for e in boot["elements"]}
     POS = {1: "GKP", 2: "DEF", 3: "MID", 4: "FWD"}
     now_utc = datetime.now(timezone.utc)
     snapshots = {s.player_fpl_id: s for s in player_snapshots_from_bootstrap(boot, now_utc)}
-    
-    from fpl_alpha.storage import open_database
-    from fpl_alpha.team_xg import resolve_fixture_team_goals
-    conn = open_database()
 
     print("Running Projections (Market-implied when available, FPL fallback otherwise)...")
     projections = []
@@ -80,25 +81,31 @@ def main():
             else:
                 opp_display[r.fpl_id] = f"{home_team.short_name} (A)"
                 
+            snapshot = snapshots[r.fpl_id]
+            if snapshot.minutes <= 0:
+                continue
+
             player = Player(
                 fpl_id=r.fpl_id, web_name=e["web_name"], full_name="", 
                 team_fpl_id=r.team_fpl_id, position=pos, now_cost=e["now_cost"]
             )
-            snapshot = snapshots[r.fpl_id]
+            cons = consistencies.get(r.fpl_id)
             
             proj = project_player_fixture(
                 player, snapshot, r, cs[r.team_fpl_id], 
-                games_played=games_played
+                games_played=games_played,
+                consistency=cons,
             )
             
-            projections.append(PlayerChoice(
-                fpl_id=r.fpl_id,
-                name=e["web_name"],
-                position=pos,
-                team_id=r.team_fpl_id,
-                cost=e["now_cost"],
-                expected_points=proj.expected_points
-            ))
+            if proj.expected_points > 0:
+                projections.append(PlayerChoice(
+                    fpl_id=r.fpl_id,
+                    name=e["web_name"],
+                    position=pos,
+                    team_id=r.team_fpl_id,
+                    cost=e["now_cost"],
+                    expected_points=proj.expected_points
+                ))
 
     print("\nOptimizing 15-Man Wildcard Squad...")
     # Clean out injured/unavailable players to avoid picking 0.0 pointers just for budget

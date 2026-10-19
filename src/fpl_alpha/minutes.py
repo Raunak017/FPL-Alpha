@@ -95,12 +95,29 @@ def expected_minutes(
     """
     mins = max(0.0, float(minutes_total))
     games = max(1.0, float(games_played))
-    mpg = min(FULL_MATCH, mins / games)
+
+    # Gated by mins_per_appearance: established starters (>= 60 mins/app) who missed time
+    # (e.g. injuries, suspensions) are not penalized by cameo consistency shrinkage.
+    mins_per_app = (mins / matches_played) if (matches_played is not None and matches_played > 0) else 0.0
+    is_starter = mins_per_app >= 60.0
+
+    if is_starter and matches_played is not None and matches_played > 0:
+        mpg = min(FULL_MATCH, mins_per_app)
+    else:
+        mpg = min(FULL_MATCH, mins / games)
+
     w = mins / (mins + k) if (mins + k) > 0 else 0.0
     est = w * mpg + (1.0 - w) * prior
-    if matches_played is not None:
+
+    if matches_played is not None and not is_starter:
         cf = appearance_consistency_factor(matches_played, games)
-        est = est * cf
+        if mins_per_app <= 45.0:
+            est = est * cf
+        else:
+            blend = (mins_per_app - 45.0) / 15.0
+            effective_cf = blend * 1.0 + (1.0 - blend) * cf
+            est = est * effective_cf
+
     return availability * min(FULL_MATCH, est)
 
 
@@ -119,13 +136,27 @@ def start_probability(
     """
     mins = max(0.0, float(minutes_total))
     games = max(1.0, float(games_played))
-    rate = min(1.0, max(0.0, float(starts_total)) / games)
+    starts = max(0.0, float(starts_total))
+
+    mins_per_app = (mins / matches_played) if (matches_played is not None and matches_played > 0) else 0.0
+    has_starts = (matches_started is not None and matches_started > 0) or (starts > 0)
+    is_starter = (mins_per_app >= 60.0) and has_starts
+
+    if is_starter and matches_played is not None and matches_played > 0:
+        start_count = float(matches_started) if matches_started is not None else starts
+        rate = min(1.0, start_count / matches_played)
+    else:
+        rate = min(1.0, starts / games)
+
     w = mins / (mins + k) if (mins + k) > 0 else 0.0
     est = w * rate + (1.0 - w) * prior
-    if matches_started is not None:
-        sf = start_consistency_factor(matches_started, games, prior=prior)
-        est = min(est, sf)
-    if matches_played is not None:
-        cf = appearance_consistency_factor(matches_played, games)
-        est = min(est, cf)
+
+    if not is_starter:
+        if matches_started is not None:
+            sf = start_consistency_factor(matches_started, games, prior=prior)
+            est = min(est, sf)
+        if matches_played is not None:
+            cf = appearance_consistency_factor(matches_played, games)
+            est = min(est, cf)
+
     return availability * min(1.0, est)

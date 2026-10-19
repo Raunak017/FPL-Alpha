@@ -45,6 +45,29 @@ def project_player_fixture(
     """Assemble deterministic baseline xPts for a single player in one fixture."""
     from fpl_alpha.minutes import expected_minutes as calc_expected_minutes
     
+    # Zero-history / unplayed players: if they haven't played, no xPts
+    if snapshot.minutes <= 0:
+        return PlayerFixtureProjection(
+            run_id=run_id,
+            gameweek=gameweek,
+            player_fpl_id=player.fpl_id,
+            fixture_fpl_id=fixture_fpl_id,
+            expected_points=0.0,
+            expected_goals=0.0,
+            expected_assists=0.0,
+            p_start=0.0,
+            p_60_plus=0.0,
+            p_clean_sheet=p_clean_sheet,
+            appearance_points=0.0,
+            goal_points=0.0,
+            assist_points=0.0,
+            clean_sheet_points=0.0,
+            save_points=0.0,
+            defensive_contribution_points=0.0,
+            goals_conceded_points=0.0,
+            bonus_points=0.0,
+        )
+
     # Minutes model
     avail = availability_factor(snapshot.status, snapshot.chance_of_playing_next_round)
     matches_played = consistency.matches_played if consistency is not None else None
