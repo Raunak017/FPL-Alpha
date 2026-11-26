@@ -340,6 +340,65 @@ class PlayerFixtureProjection:
     bonus_points: float | None = None
     goals_conceded_points: float | None = None
     card_points: float | None = None
+
+
+# --- Evaluation & Backtesting Records ----------------------------------------
+@dataclass(frozen=True)
+class MetricSummary:
+    """Statistical evaluation metrics comparing projections against actuals."""
+
+    sample_size: int
+    mae: float
+    rmse: float
+    mean_bias: float
+    pearson: float
+    spearman: float
+
+
+@dataclass(frozen=True)
+class PlayerEvaluation:
+    """Player-level comparison between projected and realized gameweek stats."""
+
+    player_fpl_id: int
+    web_name: str
+    position: str
+    team_short_name: str
+    gameweek: int
+    minutes: int
+    starts: int
+    projected_points: float
+    actual_points: int
+    points_error: float  # projected - actual
+    abs_points_error: float
+    projected_goals: float
+    actual_goals: int
+    projected_assists: float
+    actual_assists: int
+    projected_clean_sheet: float
+    actual_clean_sheet: int
+
+
+@dataclass(frozen=True)
+class GameweekEvaluationSummary:
+    """Aggregate evaluation metrics for one gameweek's projection run."""
+
+    gameweek: int
+    run_id: str
+    evaluated_at: datetime
+    all_players: MetricSummary
+    active_players: MetricSummary  # actual minutes > 0
+    relevant_players: MetricSummary  # projected xPts >= 3.0
+    position_metrics: dict[str, MetricSummary]
+    top_10_actual_points: float
+    top_10_optimal_points: float
+    top_10_overlap: int
+    top_20_overlap: int
+    goals_mae: float
+    goals_pearson: float
+    assists_mae: float
+    assists_pearson: float
+    clean_sheet_brier: float
+
 # --- Stage 2: provider odds -------------------------------------------------
 @dataclass(frozen=True)
 class OddsProviderEvent:

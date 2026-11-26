@@ -29,6 +29,7 @@ class FPLRefreshResult:
     team_count: int
     fixture_count: int
     ingested_gameweeks: tuple[int, ...]
+    evaluated_gameweeks: tuple[int, ...] = ()
 
 
 def refresh_fpl_database(force: bool = False) -> FPLRefreshResult:
@@ -80,6 +81,25 @@ def refresh_fpl_database(force: bool = False) -> FPLRefreshResult:
             raise
         else:
             connection.execute("COMMIT")
+
+        evaluated_gameweeks = []
+        for gameweek in pending_gameweeks:
+            has_proj = connection.execute(
+                "SELECT EXISTS ("
+                "  SELECT 1 FROM gameweek_projection_selections WHERE gameweek = ?"
+                "  UNION"
+                "  SELECT 1 FROM projection_runs WHERE gameweek = ?"
+                ")",
+                [gameweek, gameweek],
+            ).fetchone()[0]
+            if has_proj:
+                try:
+                    from ..evaluation import evaluate_and_persist_gameweek
+
+                    evaluate_and_persist_gameweek(connection, gameweek)
+                    evaluated_gameweeks.append(gameweek)
+                except Exception:
+                    pass
     finally:
         connection.close()
 
@@ -88,5 +108,6 @@ def refresh_fpl_database(force: bool = False) -> FPLRefreshResult:
         team_count=len(bootstrap["teams"]),
         fixture_count=len(fixture_payload),
         ingested_gameweeks=tuple(pending_gameweeks),
+        evaluated_gameweeks=tuple(evaluated_gameweeks),
     )
 
