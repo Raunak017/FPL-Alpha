@@ -5,7 +5,7 @@ stages (1–12); this one drills into the **player expected-points formula** we'
 actually trying to compute, maps each term to code that exists today, and names
 the single structural gap that blocks the rest.
 
-*Status as of 2026-09-10. Legend: ✅ done · 🟡 partial · ⬜ not started.*
+*Status as of 2026-11-26. Legend: ✅ done · 🟡 partial · ⬜ not started · 🔴 omitted.*
 
 ## The target formula
 
@@ -35,21 +35,20 @@ events with the `2026-27` ruleset; the xPts assembler will reuse these constants
 
 | Term | Status | What exists today | The gap | Plan step |
 |------|--------|-------------------|---------|-----------|
-| **P(CS)** | 🟡 ~80% | `team_xg.fit_team_goals` → `p_clean_sheet_home/away` from fitted Poisson λ; tested | Attach team CS prob to that team's players | 4 ✅ (team) |
-| **CS_pts** | ✅ done | `scoring.py` versioned ruleset | Attach team CS probability to players | 8 |
-| **xG** (per player) | 🟡 ~80% | `attack_weights_from_bootstrap` → shrunk per-90 rate × expected minutes, split by `allocate_fixture` | Calibrate priors; props as an alt source | 5 |
-| **g_pts** | ✅ done | `scoring.py` versioned ruleset | None | 8 |
-| **xA** (per player) | 🟡 ~80% | same builder splits `λ × ASSISTED_GOAL_FRACTION` by shrunk xA weight | calibrate priors | 6 |
-| **a_pts** | ✅ done | `scoring.py` versioned ruleset | None | 8 |
-| **E[bonus]** | 🔴 0% | bootstrap has `bps`, `bonus` (season totals) | BPS model — within-match ranking; hardest term | 10 |
-| **E[defcon]** | 🔴 0% | bootstrap has `defensive_contribution`, `clearances_blocks_interceptions`, `tackles`, `recoveries` | Threshold model → P(≥ threshold)·2 | 10 |
-| **P(start)** (gate) | 🟡 ~70% | `minutes.py`: `availability_factor` (fitness) + `expected_minutes` / `start_probability` with EB shrinkage; expected-minutes wired into allocation weights | Calibrate priors vs realized minutes; manual line-up overrides | 7 |
-| **Assembly** (the product) | 🔴 0% | typed contracts (`schemas.py`) ready | No `scoring`/`projections` module ties terms together | 8 |
+| **P(CS)** | ✅ done | `team_xg.fit_team_goals` → `p_clean_sheet_home/away` attached to GKP/DEF/MID in `projections.py` & `simulation.py` | None | 4 ✅ / 8 ✅ |
+| **CS_pts** | ✅ done | `scoring.py` versioned ruleset (`2026-27`) | None | 8 ✅ |
+| **xG** (per player) | ✅ done | `attack_weights_from_bootstrap` → shrunk per-90 rate × expected minutes, split by `allocate_fixture` | Props as an optional alt source | 5 ✅ |
+| **g_pts** | ✅ done | `scoring.py` versioned ruleset | None | 8 ✅ |
+| **xA** (per player) | ✅ done | `allocation.py` splits `λ × ASSISTED_GOAL_FRACTION` by shrunk xA weight | Props as an optional alt source | 6 ✅ |
+| **a_pts** | ✅ done | `scoring.py` versioned ruleset | None | 8 ✅ |
+| **E[bonus]** | 🔴 0% | `scoring.py` maps realized `bonus`; `projections.py` / `simulation.py` output `0.0` | BPS model — within-match ranking | 10 (🟡) |
+| **E[defcon]** | ✅ done | `projections.py` & `simulation.py`: Poisson threshold model from EB-shrunk `defensive_contribution_per_90` | None | 10 ✅ |
+| **Saves & GC** | ✅ done | `projections.py` & `simulation.py`: EB-shrunk `saves_per_90` (GKP) and `goals_conceded_per_90` (GKP/DEF) | None | 8 ✅ / 10 ✅ |
+| **Appearance** | ✅ done | `projections.py` & `simulation.py`: `p_start` / `expected_minutes` appearance points (1 pt `<60'`, 2 pts `60'+`) | Distinguish `P(60')` vs `P(start)` | 8 ✅ |
+| **P(start)** (gate) | ✅ done | `minutes.py`: `availability_factor` + EB-shrunk `expected_minutes` / `start_probability` + DuckDB consistency + returning-starter gating (`mins_per_appearance >= 60.0`) | Manual line-up overrides | 7 ✅ |
+| **Assembly** (the product) | ✅ done | `projections.py` (`project_player_fixture`, `generate_gameweek_projections`), `simulation.py` (`simulate_match`), and `evaluation.py` backtesting | `E[bonus]` | 8 ✅ / 9 ✅ |
 
-**Tally:** the team→player bridge and the two attacking terms (`xG`, `xA`) are now
-built (`allocation.py`); `P(CS)` is done at team level. Three constant tables are
-trivial-but-unwritten. `P(start)`, `E[defcon]`, `E[bonus]` have their raw inputs
-cached in bootstrap but no model. The product itself has no home yet.
+**Tally:** All deterministic and Monte Carlo terms except `E[bonus]` are now implemented and tested across `allocation.py`, `minutes.py`, `scoring.py`, `projections.py`, and `simulation.py`, and validated against realized FPL stats via `evaluation.py`. `E[bonus]` (`0.0` today) is the main driver of the negative mean bias (~`-1.28` pts/player across GW1–GW8).
 
 ## The structural blocker: team → player allocation — ✅ built
 
@@ -113,17 +112,9 @@ clean sheet; **no** bonus/defcon/saves) and lines it up against FPL's own
 
 ## What this formula omits vs full FPL scoring
 
-Called out so the gaps are deliberate, not forgotten. The current formula is an
-**attacking + clean-sheet + bonus + defcon** model gated by start probability. It
-does **not** yet include:
+Called out so the gaps are deliberate, not forgotten. `projections.py` and `simulation.py` now implement appearance points, saves, and goals-conceded penalties in addition to attacking, clean-sheet, and DefCon returns. The model still omits:
 
-- **Appearance points (1–2 pts).** Material for low-return players — a nailed
-  defender's *floor* is mostly appearance + defcon, not goals. Consider folding a
-  `P(start)·(1 + P(60')·1)` base term into the bracket.
-- **Saves** (GKP: 1 pt / 3 saves) — needed for a real GKP model. `saves` is in
-  bootstrap.
-- **Goals-conceded penalty** (GKP/DEF: −1 per 2 conceded) — derivable from the
-  same team λ that gives `P(CS)`; cheap to add once allocation exists.
+- **`E[bonus]` (1–3 pts).** Top-3 BPS in the match; currently `0.0` in projections/simulation (planned for Step 10 completion).
 - **Cards** (−1 / −3) — small EV; `player_to_receive_card` props exist but low value.
 - **Penalty miss / own goal** — negligible EV, skip.
 
@@ -199,15 +190,10 @@ gameweeks remain one row per player per fixture and are summed by the
 
 1. ✅ **`allocation.py`** — historical-shares team→player split of λ and assists,
    from bootstrap season xG/xA. **Unlocks `xG` and `xA`.** *(steps 5–6)*
-2. **`scoring.py` constants** — the three position→points tables + a `PlayerXPts`
-   schema record. Unblocks every downstream assembly. *(trivial)*
-3. **`P(start)` / minutes** — extract `status` + `chance_of_playing` +
-   `starts_per_90` into the schema; simple start-prob first, override hook for news.
-   Then fold the minutes weight back into `allocation.py`. *(step 7)*
-4. **Deterministic `xPts` assembler** — multiply the terms; ship the attacking +
-   CS + appearance baseline. *(step 8)*
-5. **`E[defcon]`** — P(≥ threshold)·2 from the defensive counting stats. *(step 10)*
-6. **`E[bonus]`** — BPS model; hardest, do last. *(step 10)*
-
-Steps 1–4 produce a usable, interpretable xPts baseline entirely from **already-cached
-data** — no new API spend. Step 1 is done.
+2. ✅ **`scoring.py` constants** — the position→points tables + `PlayerXPts`
+   schema record. *(trivial)*
+3. ✅ **`P(start)` / minutes** (`minutes.py`) — `status` + `chance_of_playing` +
+   `starts_per_90` + DuckDB consistency, folded into `allocation.py`. *(step 7)*
+4. ✅ **Deterministic `xPts` assembler** (`projections.py`) + **Monte Carlo simulator** (`simulation.py`) — attacking + CS + appearance + saves + goals conceded. *(steps 8–9)*
+5. ✅ **`E[defcon]`** — P(≥ threshold)·2 from EB-shrunk defensive counting stats. *(step 10)*
+6. ⬜ **`E[bonus]`** — BPS within-match ranking model; remaining Step 10 item. *(step 10)*

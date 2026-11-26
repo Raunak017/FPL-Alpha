@@ -9,15 +9,16 @@ Build a market-informed FPL projection and optimization engine that combines off
 > allocation blocker, and why odds and FPL data are complementary (backward rates
 > vs. forward fixture-specific expectations).
 
-## Status (as of 2026-10-19)
+## Status (as of 2026-11-26)
 
-Steps **1–10** and the core **Wildcard / Starting XI optimizer (Step 12)** are code-complete with robust outlier handling, DuckDB persistence, exact player mapping, and automated batch builders for mapped upcoming fixtures (`build_upcoming_team_xg.py` / `fit_team_xg.py`).
-Additionally, player-level projections and optimization are fully operational:
+Steps **1–10**, the core **Wildcard / Starting XI optimizer (Step 12)**, and the **Projection Evaluation & Backtesting pipeline** are code-complete with robust outlier handling, DuckDB persistence, exact player mapping, and automated batch builders for mapped upcoming fixtures (`build_upcoming_team_xg.py` / `fit_team_xg.py`).
+Additionally, player-level projections, evaluation, and optimization are fully operational:
 - **Historical-shares allocator** (`allocation.py`) splits market team xG (with FPL strength FDR fallback) into per-player xG/xA.
 - **Expected-minutes model** (`minutes.py`) features empirical-Bayes shrinkage, dynamic gameweek scaling, appearance/start consistency factors from DuckDB history, and starter preservation gating (`mins_per_appearance >= 60.0`), with unplayed assets zeroed out.
-- **Deterministic xPts assembler** (`projections.py`) combines appearance, goals, assists, clean sheets, defcon, saves, and goals conceded with empirical-Bayes shrinkage toward positional priors.
+- **Deterministic xPts assembler** (`projections.py`) combines appearance, goals, assists, clean sheets, defcon, saves, and goals conceded with empirical-Bayes shrinkage toward positional priors, plus `generate_gameweek_projections()` with historical state isolation (`use_historical_state=True`) for leak-free backtesting.
 - **Monte Carlo match simulator** (`simulation.py`) correlates player goals and assists to simulated team goals via multinomial/binomial sampling and calculates full point percentiles (floor, median, mean, ceiling, p10+, p15+).
 - **Wildcard & Starting XI MILP Optimizer** (`optimization.py`, `scripts/optimize_team.py`, `scripts/explore_xpts.py`) optimizes squad selection and captaincy with budget and formation constraints.
+- **Projection Evaluation & Backtesting** (`evaluation.py`, `scripts/evaluate_projections.py`, `gameweek_evaluations` DuckDB table, auto-evaluation hook in `refresh_fpl_database()`) tracks MAE, RMSE, Pearson $r$, Spearman $\rho$, bias, top-10/20 decision capture, and xG/xA/CS accuracy.
 
 **Legend:** ✅ done · 🟡 partial (see `[remaining: …]` in the heading) · ⬜ not started
 
@@ -32,7 +33,7 @@ Additionally, player-level projections and optimization are fully operational:
 | 7. Expected Minutes Model | ✅ done |
 | 8. Deterministic Expected Points | ✅ done |
 | 9. Monte Carlo Match Simulator | ✅ done |
-| 10. Advanced Scoring Models | ✅ done |
+| 10. Advanced Scoring Models | 🟡 partial [remaining: E[bonus]] |
 | 11. Multi-Gameweek Projections | ⬜ not started |
 | 12. Squad & Transfer Optimizer | 🟡 partial [remaining: multi-GW transfer plans] |
 
@@ -108,14 +109,7 @@ Integrate an odds provider and collect:
 ✅ Normalized DuckDB persistence for provider events, FPL fixture mappings,
 bookmakers, append-only outcome snapshots, and auditable player mappings.
 
-*PropLine is implemented in `src/fpl_alpha/ingestion/odds.py` and captured
-cache-first with `scripts/refresh_propline_odds.py`. Events map to FPL fixtures
-by home team, away team, and kickoff; player props are fixture-team-scoped and
-use explicit aliases or strict normalization, leaving unresolved labels `NULL`.
-The Odds API is maintained as a secondary/fallback source.*
-
-Legacy SportsGameOdds and The Odds API clients have been removed; PropLine is
-the sole odds source and uses `PROPLINE_API_KEY`.
+*PropLine (`PROPLINE_API_KEY`) is the primary odds source, implemented in `src/fpl_alpha/ingestion/odds.py` and captured cache-first with `scripts/refresh_upcoming_propline_odds.py` / `scripts/refresh_propline_odds.py`. Events map to FPL fixtures by home team, away team, and kickoff; player props are fixture-team-scoped and use explicit aliases or strict normalization, leaving unresolved labels `NULL`. The Odds API (`scripts/snapshot_odds.py`) is maintained as a secondary/fallback source; legacy SportsGameOdds code has been removed.*
 
 #### Refresh all mapped upcoming PropLine fixtures
 
@@ -222,11 +216,11 @@ Simulate each match thousands of times and apply actual FPL scoring rules.
 
 *Implemented in `src/fpl_alpha/simulation.py` (`simulate_match`); tested in `tests/test_simulation.py`.*
 
-### 10. Advanced Scoring Models — ✅ done
+### 10. Advanced Scoring Models — 🟡 partial [remaining: E[bonus] prediction]
 - ✅ Defensive contributions: empirical-Bayes shrinkage toward positional priors (`POS_DEFCON90_PRIOR`) to prevent 1-minute cameos from claiming maximum DefCon points
 - ✅ Goalkeeper saves: empirical-Bayes shrinkage toward positional priors (`POS_SAVES90_PRIOR`)
 - ✅ Goals conceded: empirical-Bayes shrinkage toward positional priors (`POS_GC90_PRIOR`)
-- ✅ Bonus points / BPS: scoring thresholds and caps mapped in `scoring.py`
+- 🟡 Bonus points / BPS: scoring thresholds and caps mapped in `scoring.py` (realized events only); `E[bonus]` prediction in `projections.py` and `simulation.py` remains unimplemented (`0.0`)
 
 *Implemented across `src/fpl_alpha/scoring.py`, `projections.py`, and `simulation.py`.*
 
@@ -249,6 +243,15 @@ Use projected points to recommend:
 - ✅ CLI Exploration: `scripts/explore_xpts.py` (filter/sort by position, form, price, xPts, Apps) and `scripts/optimize_team.py` (end-to-end wildcard optimizer)
 - ⬜ Transfers & hits planning over multi-GW horizons
 - ⬜ Chips: Free Hit, Bench Boost, Triple Captain
+
+### Projection Evaluation & Backtesting — ✅ done
+Evaluate deterministic projections against realized FPL match stats without lookahead bias:
+
+- ✅ Statistical accuracy metrics (`evaluation.py`): MAE, RMSE, Pearson $r$, Spearman rank correlation $\rho$, mean bias, and active/relevant player filtering
+- ✅ Decision & underlying-stat metrics: Top-10 / Top-20 points capture ratio vs optimal, overlap count, xG vs goals, xA vs assists, and clean-sheet Brier score
+- ✅ Historical state isolation: `generate_gameweek_projections(..., use_historical_state=True)` in `projections.py` reconstructs pre-GW state from `player_gameweek_history`
+- ✅ Persistence & automation: `gameweek_evaluations` DuckDB table (`storage.py`) + automatic evaluation of finalized gameweeks inside `refresh_fpl_database()`
+- ✅ CLI & tests: `scripts/evaluate_projections.py` (`--gw`, `--backfill`, `--force`, `--player`) and `tests/test_evaluation.py`
 
 ## Initial Focus
 

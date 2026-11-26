@@ -20,6 +20,8 @@ from .config import DATA
 from .schemas import (
     Fixture,
     FixtureTeamXG,
+    GameweekEvaluationSummary,
+    MetricSummary,
     OddsBookmaker,
     OddsEventFixtureMapping,
     OddsIngestionRun,
@@ -372,6 +374,41 @@ def initialize_schema(connection: duckdb.DuckDBPyConnection) -> None:
         ALTER TABLE odds_ingestion_runs ADD COLUMN IF NOT EXISTS retry_of_run_id VARCHAR;
         ALTER TABLE odds_ingestion_runs ADD COLUMN IF NOT EXISTS is_retry BOOLEAN DEFAULT FALSE;
         ALTER TABLE odds_ingestion_runs ALTER COLUMN input_fingerprint DROP NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS gameweek_evaluations (
+            gameweek INTEGER NOT NULL,
+            run_id UUID NOT NULL,
+            evaluated_at TIMESTAMPTZ NOT NULL,
+            sample_size INTEGER NOT NULL,
+            active_sample_size INTEGER NOT NULL,
+            relevant_sample_size INTEGER NOT NULL,
+            overall_mae DOUBLE NOT NULL,
+            overall_rmse DOUBLE NOT NULL,
+            overall_bias DOUBLE NOT NULL,
+            overall_pearson DOUBLE,
+            overall_spearman DOUBLE,
+            active_mae DOUBLE NOT NULL,
+            active_rmse DOUBLE NOT NULL,
+            active_bias DOUBLE NOT NULL,
+            active_pearson DOUBLE,
+            active_spearman DOUBLE,
+            relevant_mae DOUBLE NOT NULL,
+            relevant_rmse DOUBLE NOT NULL,
+            relevant_bias DOUBLE NOT NULL,
+            relevant_pearson DOUBLE,
+            relevant_spearman DOUBLE,
+            top_10_actual_points DOUBLE NOT NULL,
+            top_10_optimal_points DOUBLE NOT NULL,
+            top_10_overlap INTEGER NOT NULL,
+            top_20_overlap INTEGER NOT NULL,
+            goals_mae DOUBLE,
+            goals_pearson DOUBLE,
+            assists_mae DOUBLE,
+            assists_pearson DOUBLE,
+            clean_sheet_brier DOUBLE,
+            position_metrics VARCHAR,
+            PRIMARY KEY (gameweek, run_id)
+        );
 
         CREATE OR REPLACE VIEW player_snapshot_values AS
         SELECT
@@ -882,6 +919,187 @@ def select_gameweek_projection_run(
         """,
         [gameweek, run_id, selected_at, selection_reason],
     )
+
+
+def upsert_gameweek_evaluation(
+    connection: duckdb.DuckDBPyConnection,
+    summary: GameweekEvaluationSummary,
+) -> None:
+    """Persist or update an aggregate evaluation summary for one gameweek."""
+    pos_json = json.dumps(
+        {
+            pos: {
+                "sample_size": m.sample_size,
+                "mae": m.mae,
+                "rmse": m.rmse,
+                "mean_bias": m.mean_bias,
+                "pearson": m.pearson,
+                "spearman": m.spearman,
+            }
+            for pos, m in summary.position_metrics.items()
+        }
+    )
+    connection.execute(
+        """
+        INSERT INTO gameweek_evaluations (
+            gameweek, run_id, evaluated_at, sample_size, active_sample_size, relevant_sample_size,
+            overall_mae, overall_rmse, overall_bias, overall_pearson, overall_spearman,
+            active_mae, active_rmse, active_bias, active_pearson, active_spearman,
+            relevant_mae, relevant_rmse, relevant_bias, relevant_pearson, relevant_spearman,
+            top_10_actual_points, top_10_optimal_points, top_10_overlap, top_20_overlap,
+            goals_mae, goals_pearson, assists_mae, assists_pearson, clean_sheet_brier,
+            position_metrics
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?, ?, ?,
+            ?
+        )
+        ON CONFLICT (gameweek, run_id) DO UPDATE SET
+            evaluated_at = excluded.evaluated_at,
+            sample_size = excluded.sample_size,
+            active_sample_size = excluded.active_sample_size,
+            relevant_sample_size = excluded.relevant_sample_size,
+            overall_mae = excluded.overall_mae,
+            overall_rmse = excluded.overall_rmse,
+            overall_bias = excluded.overall_bias,
+            overall_pearson = excluded.overall_pearson,
+            overall_spearman = excluded.overall_spearman,
+            active_mae = excluded.active_mae,
+            active_rmse = excluded.active_rmse,
+            active_bias = excluded.active_bias,
+            active_pearson = excluded.active_pearson,
+            active_spearman = excluded.active_spearman,
+            relevant_mae = excluded.relevant_mae,
+            relevant_rmse = excluded.relevant_rmse,
+            relevant_bias = excluded.relevant_bias,
+            relevant_pearson = excluded.relevant_pearson,
+            relevant_spearman = excluded.relevant_spearman,
+            top_10_actual_points = excluded.top_10_actual_points,
+            top_10_optimal_points = excluded.top_10_optimal_points,
+            top_10_overlap = excluded.top_10_overlap,
+            top_20_overlap = excluded.top_20_overlap,
+            goals_mae = excluded.goals_mae,
+            goals_pearson = excluded.goals_pearson,
+            assists_mae = excluded.assists_mae,
+            assists_pearson = excluded.assists_pearson,
+            clean_sheet_brier = excluded.clean_sheet_brier,
+            position_metrics = excluded.position_metrics
+        """,
+        [
+            summary.gameweek,
+            summary.run_id,
+            summary.evaluated_at,
+            summary.all_players.sample_size,
+            summary.active_players.sample_size,
+            summary.relevant_players.sample_size,
+            summary.all_players.mae,
+            summary.all_players.rmse,
+            summary.all_players.mean_bias,
+            summary.all_players.pearson,
+            summary.all_players.spearman,
+            summary.active_players.mae,
+            summary.active_players.rmse,
+            summary.active_players.mean_bias,
+            summary.active_players.pearson,
+            summary.active_players.spearman,
+            summary.relevant_players.mae,
+            summary.relevant_players.rmse,
+            summary.relevant_players.mean_bias,
+            summary.relevant_players.pearson,
+            summary.relevant_players.spearman,
+            summary.top_10_actual_points,
+            summary.top_10_optimal_points,
+            summary.top_10_overlap,
+            summary.top_20_overlap,
+            summary.goals_mae,
+            summary.goals_pearson,
+            summary.assists_mae,
+            summary.assists_pearson,
+            summary.clean_sheet_brier,
+            pos_json,
+        ],
+    )
+
+
+def load_gameweek_evaluations(
+    connection: duckdb.DuckDBPyConnection,
+) -> list[GameweekEvaluationSummary]:
+    """Load all persisted gameweek evaluation summaries, ordered by gameweek."""
+    rows = connection.execute(
+        """
+        SELECT
+            gameweek, run_id, evaluated_at, sample_size, active_sample_size, relevant_sample_size,
+            overall_mae, overall_rmse, overall_bias, overall_pearson, overall_spearman,
+            active_mae, active_rmse, active_bias, active_pearson, active_spearman,
+            relevant_mae, relevant_rmse, relevant_bias, relevant_pearson, relevant_spearman,
+            top_10_actual_points, top_10_optimal_points, top_10_overlap, top_20_overlap,
+            goals_mae, goals_pearson, assists_mae, assists_pearson, clean_sheet_brier,
+            position_metrics
+        FROM gameweek_evaluations
+        ORDER BY gameweek ASC
+        """
+    ).fetchall()
+
+    results: list[GameweekEvaluationSummary] = []
+    for r in rows:
+        pos_raw = json.loads(r[30]) if r[30] else {}
+        pos_metrics = {
+            pos: MetricSummary(
+                sample_size=d["sample_size"],
+                mae=d["mae"],
+                rmse=d["rmse"],
+                mean_bias=d["mean_bias"],
+                pearson=d["pearson"],
+                spearman=d["spearman"],
+            )
+            for pos, d in pos_raw.items()
+        }
+        summary = GameweekEvaluationSummary(
+            gameweek=r[0],
+            run_id=str(r[1]),
+            evaluated_at=r[2],
+            all_players=MetricSummary(
+                sample_size=r[3],
+                mae=r[6],
+                rmse=r[7],
+                mean_bias=r[8],
+                pearson=r[9] if r[9] is not None else 0.0,
+                spearman=r[10] if r[10] is not None else 0.0,
+            ),
+            active_players=MetricSummary(
+                sample_size=r[4],
+                mae=r[11],
+                rmse=r[12],
+                mean_bias=r[13],
+                pearson=r[14] if r[14] is not None else 0.0,
+                spearman=r[15] if r[15] is not None else 0.0,
+            ),
+            relevant_players=MetricSummary(
+                sample_size=r[5],
+                mae=r[16],
+                rmse=r[17],
+                mean_bias=r[18],
+                pearson=r[19] if r[19] is not None else 0.0,
+                spearman=r[20] if r[20] is not None else 0.0,
+            ),
+            position_metrics=pos_metrics,
+            top_10_actual_points=r[21],
+            top_10_optimal_points=r[22],
+            top_10_overlap=r[23],
+            top_20_overlap=r[24],
+            goals_mae=r[25] if r[25] is not None else 0.0,
+            goals_pearson=r[26] if r[26] is not None else 0.0,
+            assists_mae=r[27] if r[27] is not None else 0.0,
+            assists_pearson=r[28] if r[28] is not None else 0.0,
+            clean_sheet_brier=r[29] if r[29] is not None else 0.0,
+        )
+        results.append(summary)
+    return results
+
 
 def load_teams(connection: duckdb.DuckDBPyConnection) -> list[Team]:
     """Load canonical teams for provider-event fixture matching."""

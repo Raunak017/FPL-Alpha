@@ -89,23 +89,29 @@ FPL-Alpha/
 │   ├── config.py             # env + paths + per-provider rate-limit budgets
 │   ├── cache.py              # cache-first, throttled HTTP gateway (the one choke point)
 │   ├── snapshots.py          # timestamped odds/FPL captures + manifest
+│   ├── storage.py            # DuckDB persistence, history, projections, evaluations
 │   ├── schemas.py            # typed data contracts between pipeline stages
 │   ├── ingestion/            # fpl.py · odds.py · stats.py            (steps 1–2)
 │   ├── identity.py           # canonical FPL ids + odds-name matching  (identity layer)
 │   ├── markets.py            # de-vig + consensus                      (step 3)
 │   ├── team_xg.py            # market-implied Poisson team goals       (step 4)
-│   └── models/               # player-level models                    (steps 5+, empty)
+│   ├── allocation.py         # team-to-player xG/xA allocation         (steps 5–6)
+│   ├── minutes.py            # expected minutes + start consistency    (step 7)
+│   ├── scoring.py            # versioned FPL scoring ruleset
+│   ├── projections.py        # deterministic xPts assembler            (step 8)
+│   ├── simulation.py         # Monte Carlo match simulator             (step 9)
+│   ├── optimization.py       # MILP Wildcard & Starting XI optimizer   (step 12)
+│   ├── evaluation.py         # backtesting & realized-stats metrics
+│   └── models/               # reserved for sub-models                 (empty)
 │
-├── scripts/                  # refresh_fpl.py · refresh_upcoming_propline_odds.py
-├── tests/                    # pytest (no-vig math covered)
+├── scripts/                  # refresh_fpl.py · refresh_upcoming_propline_odds.py ·
+│                             # build_upcoming_team_xg.py · optimize_team.py ·
+│                             # explore_xpts.py · evaluate_projections.py
+├── tests/                    # pytest
 ├── notebooks/
 ├── docs/                     # PROJECT_PLAN.md (the 12-step roadmap)
 └── data/{raw,processed,snapshots}/   # cached API JSON (gitignored)
 ```
-
-Downstream stages (`simulation`, `scoring`, `projections`, `optimization`,
-`evaluation`) are added when reached — the plan reserves the names, but empty
-packages are intentionally omitted for now.
 
 ## Running
 
@@ -118,7 +124,7 @@ python scripts/refresh_fpl.py         # cache FPL bootstrap + fixtures (cache-fi
 python scripts/refresh_upcoming_propline_odds.py  # mapped upcoming EPL odds
 # Or fallback scheduled snapshot:
 python scripts/snapshot_odds.py --scope epl-gw1 --captured-at 2026-08-21T17:30:00Z
-pytest                                 # runs the no-vig math tests
+pytest                                 # runs the unit test suite
 ```
 
 `refresh_fpl.py` does nothing over the wire if the cache is still fresh; pass
